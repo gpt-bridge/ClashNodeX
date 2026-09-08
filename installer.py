@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # ClashNodeX Modern Setup Wizard (安装向导)
-# 版本: v1.2.0 (Build 2026.09.07)
+# 版本: v1.2.1 (Build 2026.09.08)
 # 纯白/浅灰现代极客风格 · 无黑边 · 驱动器可视化空间卡片 · 零闪烁平滑启动 · 2K/3K/4K 高分屏自适应等比放大
 
 import os
@@ -106,7 +106,7 @@ class ClashNodeXInstaller(tk.Tk):
 
         self.scale = get_screen_scale_factor()
 
-        self.title('Clash 节点跃迁 (ClashNodeX) v1.2.0 - 安装向导')
+        self.title('Clash 节点跃迁 (ClashNodeX) v1.2.1 - 安装向导')
         
         # Grand, expansive, high-DPI modern window size (base 960x640, scaled by DPI)
         sw = self.winfo_screenwidth()
@@ -135,23 +135,10 @@ class ClashNodeXInstaller(tk.Tk):
         self.font_code = ('Consolas', 10)
         self.font_log = ('Consolas', 9)
 
-        try:
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("clashnodex.installer.app")
-        except Exception:
-            pass
-
         icon_path = get_res_path('app_icon.ico')
         if os.path.exists(icon_path):
             try:
                 self.iconbitmap(icon_path)
-            except Exception:
-                pass
-
-        png_path = get_res_path('app_icon.png')
-        if os.path.exists(png_path) and HAS_PIL:
-            try:
-                self._app_icon_img = ImageTk.PhotoImage(file=png_path)
-                self.iconphoto(True, self._app_icon_img)
             except Exception:
                 pass
 
@@ -275,7 +262,7 @@ class ClashNodeXInstaller(tk.Tk):
         # Version Pill Badge
         badge_frame = tk.Frame(top_hero, bg='#E0F2FE', padx=self._scale(10), pady=self._scale(4))
         badge_frame.pack(anchor=tk.W)
-        lbl_badge = tk.Label(badge_frame, text='⚡ v1.2.0 (Build 2026.09.07)',
+        lbl_badge = tk.Label(badge_frame, text='⚡ v1.2.1 (Build 2026.09.08)',
                              font=self.font_badge,
                              fg='#0369A1', bg='#E0F2FE')
         lbl_badge.pack()
@@ -328,7 +315,7 @@ class ClashNodeXInstaller(tk.Tk):
         inner = tk.Frame(self.bottom_bar, bg='#FFFFFF')
         inner.pack(fill=tk.BOTH, expand=True, padx=self._scale(28), pady=self._scale(14))
 
-        self.lbl_bottom_hint = tk.Label(inner, text='Clash Verge 专属极客管家 · 智能跃迁与生命周期真实流量',
+        self.lbl_bottom_hint = tk.Label(inner, text='Clash Verge 专属极客管家 · 智能节点跃迁与多维精准测速',
                                         font=self.font_small, fg='#64748B', bg='#FFFFFF')
         self.lbl_bottom_hint.pack(side=tk.LEFT)
 
@@ -573,7 +560,7 @@ class ClashNodeXInstaller(tk.Tk):
 
         tk.Label(title_box, text='⚡ 正在部署 ClashNodeX 组件...',
                  font=self.font_heading, fg='#0F172A', bg='#FFFFFF').pack(anchor=tk.W)
-        tk.Label(title_box, text='正在解压运行环境、跃迁引擎、生命周期流量管家及高像素狐狸素材',
+        tk.Label(title_box, text='正在解压运行环境、跃迁引擎、智能路由测速内核及高像素狐狸素材',
                  font=self.font_small, fg='#64748B', bg='#FFFFFF').pack(anchor=tk.W, pady=(self._scale(4), 0))
 
         self.lbl_status = tk.Label(container, text='准备创建运行主目录...',
@@ -638,18 +625,18 @@ class ClashNodeXInstaller(tk.Tk):
             with open(guide_path, 'w', encoding='utf-8') as f:
                 f.write(
 '===================================================================\n'
-'⚡ Clash 节点跃迁 (ClashNodeX) v1.2.0 (Build 2026.09.07)\n'
-'Clash Verge 专属极客管家 · 智能节点跃迁与生命周期流量统计\n'
+'⚡ Clash 节点跃迁 (ClashNodeX) v1.2.1 (Build 2026.09.08)\n'
+'Clash Verge 专属极客管家 · 智能节点跃迁与多维精准测速切换\n'
 '===================================================================\n\n'
 '【核心功能亮点】\n'
 '1. 节点智能跃迁与无感热替换:\n'
 '   - 自动与 Clash Verge / Mihomo 核心实时同步。\n'
 '   - 支持多模式延迟测速 (TCP 握手、HTTP Connect、真连接握手、DNS 校验)。\n'
 '   - 毫秒级一键跃迁至最优极速节点，无感热替换。\n'
-'2. 真实生命周期流量统计 (Reboot-Proof):\n'
-'   - 完整统计所有流经 Clash 核心的真实上行与下行总体流量 (GB 级真实数据)。\n'
-'   - 绝不因电脑关机重启、软件开闭而清零重置，真实反映您的宽带/套餐消耗。\n'
-'   - 支持随时自定义统计起止周期 (本月1号、今日、或任意起始点)。\n'
+'2. 多维度精准测速引擎:\n'
+'   - 真连接 HTTP 204 精准延迟测速与 TCP 延迟测试。\n'
+'   - 支持多线程批量并发测速，迅速识别超时或失效节点。\n'
+'   - 测速结果智能着色，梯级分明。\n'
 '3. 全面代理分组排序管理:\n'
 '   - 支持分组任意置顶、上移、下移，配置即时写入并同步到 Clash Verge。\n'
 '4. 极致易用的交互与经典浅白皮肤:\n'
@@ -760,7 +747,7 @@ class ClashNodeXInstaller(tk.Tk):
 
         tk.Label(hero_box, text='🎉 安装顺利完成！',
                  font=self.font_title, fg='#059669', bg='#FFFFFF').pack(anchor=tk.W)
-        tk.Label(hero_box, text=f'Clash 节点跃迁 (ClashNodeX) v1.2.0 已就绪并部署至:\n{dest_dir}',
+        tk.Label(hero_box, text=f'Clash 节点跃迁 (ClashNodeX) v1.2.1 已就绪并部署至:\n{dest_dir}',
                  font=self.font_small, fg='#334155', bg='#FFFFFF', justify=tk.LEFT).pack(anchor=tk.W, pady=(self._scale(5), 0))
 
         # Path Card with Open Directory Button
@@ -790,8 +777,8 @@ class ClashNodeXInstaller(tk.Tk):
 
         tips = (
             '• 智能节点跃迁: 自动与 Clash Verge / Mihomo 实时连接，毫秒级热替换最优节点\n'
-            '• 真实流量管家: 权威统计流经内核的真实总体流量，重启电脑/软件绝不清零 (GB 级真实反映)\n'
             '• 多模式精准测速: 支持真连接 HTTP 204、TCP 握手、Connect 等多维度测速\n'
+            '• 智能一键优选: 智能识别最优低延迟节点，一键无感切换生效\n'
             '• 灵活分组管理: 支持分组任意上移、下移、置顶，配置即时写入并同步至客户端'
         )
         tk.Label(card, text=tips, font=self.font_small,

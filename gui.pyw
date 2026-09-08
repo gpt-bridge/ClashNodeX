@@ -408,14 +408,7 @@ class ClashNodeManagerApp:
         self.root = root
         self.scale = get_screen_scale_factor()
 
-        # Set AppUserModelID so Windows Taskbar pins and shows the correct icon
-        try:
-            import ctypes
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("clashnodex.manager.app")
-        except Exception:
-            pass
-
-        self.root.title("⚡ Clash 节点跃迁 (ClashNodeX) v1.2.0 (Build 2026.09.07) - Clash Verge 专属极客管家")
+        self.root.title("⚡ Clash 节点跃迁 (ClashNodeX) v1.2.1 (Build 2026.09.08) - Clash Verge 专属极客管家")
         
         # Load Circular Cyber Fox icon
         ico_file = os.path.join(getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))), "app_icon.ico")
@@ -426,25 +419,14 @@ class ClashNodeManagerApp:
                 self.root.iconbitmap(ico_file)
             except Exception:
                 pass
-
-        png_file = os.path.join(getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))), "app_icon.png")
-        if not os.path.exists(png_file):
-            png_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app_icon.png")
-        if os.path.exists(png_file):
-            try:
-                from PIL import ImageTk
-                self._app_icon_img = ImageTk.PhotoImage(file=png_file)
-                self.root.iconphoto(True, self._app_icon_img)
-            except Exception:
-                pass
         
-        base_w, base_h = int(1440 * self.scale), int(860 * self.scale)
+        base_w, base_h = int(1220 * self.scale), int(780 * self.scale)
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
         pos_x = max(20, (screen_w - base_w) // 2)
         pos_y = max(20, (screen_h - base_h) // 2)
         self.root.geometry(f"{base_w}x{base_h}+{pos_x}+{pos_y}")
-        self.root.minsize(int(1180 * self.scale), int(680 * self.scale))
+        self.root.minsize(int(960 * self.scale), int(600 * self.scale))
 
         # 1. Load settings, theme and fonts
         self.settings = load_settings()
@@ -471,39 +453,15 @@ class ClashNodeManagerApp:
         self.COLOR_DANGER = self.theme["danger"]
         self.COLOR_TOP = self.theme["top"]
 
-        # Traffic monitor state (persisted across reboots and software restarts)
-        self.traffic_enabled = bool(self.settings.get("traffic_enabled", True))
-        self.traffic_start_time = float(self.settings.get("traffic_start_time", 0))
-        if self.traffic_start_time <= 0:
-            try:
-                import ctypes
-                uptime_ms = ctypes.windll.kernel32.GetTickCount64()
-                self.traffic_start_time = time.time() - (uptime_ms / 1000.0)
-            except Exception:
-                self.traffic_start_time = time.time()
-
-        # Lifetime accumulated across past Clash sessions (e.g. across PC reboots)
-        self.traffic_lifetime_up = int(self.settings.get("traffic_lifetime_up", 0))
-        self.traffic_lifetime_down = int(self.settings.get("traffic_lifetime_down", 0))
-        self.traffic_session_base_up = int(self.settings.get("traffic_session_base_up", 0))
-        self.traffic_session_base_down = int(self.settings.get("traffic_session_base_down", 0))
-        self.traffic_last_core_up = int(self.settings.get("traffic_last_core_up", 0))
-        self.traffic_last_core_down = int(self.settings.get("traffic_last_core_down", 0))
-        self.traffic_proxy_lifetime_up = int(self.settings.get("traffic_proxy_lifetime_up", 0))
-        self.traffic_proxy_lifetime_down = int(self.settings.get("traffic_proxy_lifetime_down", 0))
-
-        # Non-blocking traffic state initialization (worker thread handles first sync)
-        self.traffic_running = False
-        self.traffic_thread = None
-        self.last_traffic_snap = None
-
         self._save_timer = None
         self._save_lock = threading.Lock()
+        self.speed_running = False
         self.root.protocol("WM_DELETE_WINDOW", self._on_window_close)
 
         self._init_styles()
         self._build_ui()
         self._bind_shortcuts()
+        self._start_speed_monitor()
 
         if not self.cm.config_dir:
             from tkinter import filedialog
@@ -519,9 +477,6 @@ class ClashNodeManagerApp:
 
         self._load_profiles_into_dropdown()
         self._refresh_group_list()
-
-        if self.traffic_enabled:
-            self._start_traffic_worker()
 
     def _scale(self, value: int) -> int:
         return int(round(value * self.scale))
@@ -629,8 +584,8 @@ class ClashNodeManagerApp:
             background=self.theme["tree_bg"],
             foreground=self.theme["tree_fg"],
             fieldbackground=self.theme["tree_bg"],
-            borderwidth=0,
-            relief="flat"
+            borderwidth=1,
+            relief="solid"
         )
         style.configure(
             "Treeview.Heading",
@@ -651,34 +606,22 @@ class ClashNodeManagerApp:
                 font=self.default_font
             )
 
-        # Traffic Dashboard Bar
-        if hasattr(self, "traffic_bar") and self.traffic_bar:
-            self.traffic_bar.configure(bg=self.theme["sidebar"], highlightbackground=self.theme["border"])
-        if hasattr(self, "lbl_traffic_total") and self.lbl_traffic_total:
-            self.lbl_traffic_total.configure(bg=self.theme["sidebar"], fg=self.theme["primary"], font=self.bold_font)
-        if hasattr(self, "lbl_traffic_proxy") and self.lbl_traffic_proxy:
-            self.lbl_traffic_proxy.configure(bg=self.theme["sidebar"], fg="#059669", font=self.bold_font)
-        if hasattr(self, "speed_card") and self.speed_card:
-            self.speed_card.configure(bg=self.theme["card_bg"], highlightbackground=self.theme["border"])
-        if hasattr(self, "lbl_traffic_speed") and self.lbl_traffic_speed:
-            self.lbl_traffic_speed.configure(bg=self.theme["card_bg"], fg=self.theme["primary"], font=self.bold_font)
-        if hasattr(self, "btn_traffic_reset") and self.btn_traffic_reset:
-            self.btn_traffic_reset.configure(bg=self.theme["btn_bg"], fg=self.theme["btn_fg"], font=self.default_font)
-        if hasattr(self, "btn_traffic_date") and self.btn_traffic_date:
-            self.btn_traffic_date.configure(bg=self.theme["btn_bg"], fg=self.theme["btn_fg"], font=self.default_font)
-        if hasattr(self, "btn_traffic_toggle") and self.btn_traffic_toggle:
-            self.btn_traffic_toggle.configure(font=self.bold_font)
-        if hasattr(self, "lbl_traffic_period") and self.lbl_traffic_period:
-            self.lbl_traffic_period.configure(bg=self.theme["sidebar"], fg=self.theme["text_muted"], font=self.default_font)
-
         # Action Toolbar - Row 1
         if hasattr(self, "toolbar_row1") and self.toolbar_row1:
-            self.toolbar_row1.configure(bg=self.theme["card_bg"], highlightbackground=self.theme["border"])
+            self.toolbar_row1.configure(bg=self.theme["card_bg"])
         if hasattr(self, "lbl_mode") and self.lbl_mode:
             self.lbl_mode.configure(bg=self.theme["card_bg"], fg=self.theme["text_muted"], font=self.default_font)
+        if hasattr(self, "speed_frame") and self.speed_frame:
+            self.speed_frame.configure(bg=self.theme["bg"])
+            if hasattr(self, "lbl_speed_title") and self.lbl_speed_title:
+                self.lbl_speed_title.configure(bg=self.theme["bg"], fg=self.theme["text"], font=self.bold_font)
+            if hasattr(self, "lbl_speed_up") and self.lbl_speed_up:
+                self.lbl_speed_up.configure(bg=self.theme["bg"], fg=self.theme.get("primary", "#2563eb"), font=self.bold_font)
+            if hasattr(self, "lbl_speed_down") and self.lbl_speed_down:
+                self.lbl_speed_down.configure(bg=self.theme["bg"], fg=self.theme.get("success", "#059669"), font=self.bold_font)
 
         if hasattr(self, "status_bar") and self.status_bar:
-            self.status_bar.configure(bg=self.theme["sidebar"], highlightbackground=self.theme["border"])
+            self.status_bar.configure(bg=self.theme["sidebar"])
             if hasattr(self, "status_msg_lbl") and self.status_msg_lbl:
                 self.status_msg_lbl.configure(bg=self.theme["sidebar"], fg=self.theme["text"], font=self.default_font)
             if hasattr(self, "lbl_status_info") and self.lbl_status_info:
@@ -686,8 +629,6 @@ class ClashNodeManagerApp:
 
         if hasattr(self, "paned") and self.paned:
             self.paned.configure(bg=self.theme["border"])
-        if hasattr(self, "top_right_box") and self.top_right_box:
-            self.top_right_box.configure(bg=self.theme["bg"])
         if hasattr(self, "theme_menubutton") and self.theme_menubutton:
             self.theme_menubutton.configure(
                 text=f"🎨 皮肤: {self.theme.get('name', '默认')}",
@@ -695,14 +636,10 @@ class ClashNodeManagerApp:
                 fg=self.theme["btn_fg"],
                 font=self.default_font
             )
-        if hasattr(self, "font_box") and self.font_box:
-            self.font_box.configure(bg=self.theme["sidebar"])
-        if hasattr(self, "lbl_font_title") and self.lbl_font_title:
-            self.lbl_font_title.configure(bg=self.theme["sidebar"], fg=self.theme["text"], font=self.bold_font)
         if hasattr(self, "btn_font_dec") and self.btn_font_dec:
-            self.btn_font_dec.configure(bg=self.theme["btn_bg"], fg=self.theme["primary"])
-            self.btn_font_inc.configure(bg=self.theme["btn_bg"], fg=self.theme["primary"])
-            self.lbl_font_scale.configure(bg=self.theme["sidebar"], fg=self.theme["primary"], font=self.bold_font)
+            self.btn_font_dec.configure(bg=self.theme["btn_bg"], fg=self.theme["btn_fg"])
+            self.btn_font_inc.configure(bg=self.theme["btn_bg"], fg=self.theme["btn_fg"])
+            self.lbl_font_scale.configure(bg=self.theme["bg"], fg=self.theme["text_muted"])
         if hasattr(self, "btn_about") and self.btn_about:
             self.btn_about.configure(bg=self.theme["btn_bg"], fg=self.theme["btn_fg"], font=self.default_font)
         if hasattr(self, "btn_save") and self.btn_save:
@@ -748,64 +685,46 @@ class ClashNodeManagerApp:
         top_bar = ttk.Frame(main_box, padding=(pad_x_lg, pad_y_md))
         top_bar.pack(fill=tk.X, side=tk.TOP)
 
-        title_lbl = ttk.Label(top_bar, text="⚡ Clash 节点跃迁 (ClashNodeX)", style="Header.TLabel")
-        title_lbl.pack(side=tk.LEFT, padx=(0, self._scale(18)))
-
-        ttk.Label(top_bar, text="当前配置 Profile:").pack(side=tk.LEFT, padx=(0, self._scale(8)))
-        self.profile_combo = ttk.Combobox(top_bar, state="readonly", width=42)
-        self.profile_combo.pack(side=tk.LEFT, padx=(0, self._scale(10)))
-        self.profile_combo.bind("<<ComboboxSelected>>", self._on_profile_selected)
-        self._bind_combobox_click_to_open(self.profile_combo)
-
-        self.reload_profile_btn = ttk.Button(top_bar, text="🔄 重新加载", command=self._reload_profile)
-        self.reload_profile_btn.pack(side=tk.LEFT, padx=(0, self._scale(15)))
-
-        # Top Bar Right Container (Holds about, feedback, theme, font zoom)
-        self.top_right_box = tk.Frame(top_bar, bg=self.theme["bg"])
-        self.top_right_box.pack(side=tk.RIGHT)
-
+        # Top Bar Right Controls (PACK FIRST to guarantee they NEVER get squeezed or clipped!)
         self.btn_about = tk.Button(
-            self.top_right_box,
+            top_bar,
             text="ℹ️ 关于与说明",
             bg=self.theme["btn_bg"],
             fg=self.theme["btn_fg"],
             font=self.default_font,
-            relief=tk.FLAT,
-            bd=0,
-            padx=self._scale(8),
+            relief=tk.GROOVE,
+            padx=self._scale(6),
             pady=self._scale(2),
             cursor="hand2",
             command=self._action_show_about
         )
-        self.btn_about.pack(side=tk.RIGHT, padx=(self._scale(6), 0))
+        self.btn_about.pack(side=tk.RIGHT, padx=(self._scale(4), 0))
         self._apply_interactive_effect(self.btn_about)
 
         self.btn_feedback = tk.Button(
-            self.top_right_box,
+            top_bar,
             text="💬 意见反馈",
             bg=self.theme["btn_bg"],
             fg=self.theme["primary"],
             font=self.default_font,
-            relief=tk.FLAT,
-            bd=0,
-            padx=self._scale(8),
+            relief=tk.GROOVE,
+            padx=self._scale(6),
             pady=self._scale(2),
             cursor="hand2",
             command=self._action_show_feedback
         )
-        self.btn_feedback.pack(side=tk.RIGHT, padx=(self._scale(6), 0))
+        self.btn_feedback.pack(side=tk.RIGHT, padx=(self._scale(4), 0))
         self._apply_interactive_effect(self.btn_feedback)
 
         # Theme menu
         self.theme_menubutton = tk.Menubutton(
-            self.top_right_box,
-            text=f"🎨 皮肤: {self.theme.get('name', '默认')}",
+            top_bar,
+            text="🎨 皮肤",
             bg=self.theme["btn_bg"],
             fg=self.theme["btn_fg"],
             font=self.default_font,
-            relief=tk.FLAT,
-            bd=0,
-            padx=self._scale(8),
+            relief=tk.GROOVE,
+            padx=self._scale(6),
             pady=self._scale(2),
             cursor="hand2"
         )
@@ -822,209 +741,89 @@ class ClashNodeManagerApp:
         self.theme_menu.add_command(label="📂 导入配色方案 (*.json)...", command=self._action_import_theme)
         self.theme_menu.add_command(label="💾 导出当前配色模板 (*.json)...", command=self._action_export_theme)
         self.theme_menubutton.config(menu=self.theme_menu)
-        self.theme_menubutton.pack(side=tk.RIGHT, padx=self._scale(6))
+        self.theme_menubutton.pack(side=tk.RIGHT, padx=self._scale(4))
 
-        # Font Zoom Controls - Dedicated Pill Badge
-        self.font_box = tk.Frame(
-            self.top_right_box,
-            bg=self.theme["sidebar"],
-            bd=0,
-            relief=tk.FLAT,
-            highlightthickness=1,
-            highlightbackground=self.theme["border"],
-            padx=self._scale(4),
-            pady=self._scale(1)
-        )
-        self.font_box.pack(side=tk.RIGHT, padx=self._scale(6))
+        # Font Zoom Controls (Always fully visible, never clipped)
+        font_box = tk.Frame(top_bar, bg=self.theme["bg"])
+        font_box.pack(side=tk.RIGHT, padx=(self._scale(4), self._scale(8)))
 
-        self.lbl_font_title = tk.Label(
-            self.font_box,
-            text="🔠 字号",
-            bg=self.theme["sidebar"],
-            fg=self.theme["text"],
-            font=self.bold_font
-        )
-        self.lbl_font_title.pack(side=tk.LEFT, padx=(self._scale(2), self._scale(4)))
-
+        tk.Label(font_box, text="字号:", bg=self.theme["bg"], fg=self.theme["text_muted"], font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT, padx=(0, 2))
         self.btn_font_dec = tk.Button(
-            self.font_box,
-            text="－",
-            font=("Segoe UI", 9, "bold"),
-            width=2,
-            bg=self.theme["btn_bg"],
-            fg=self.theme["primary"],
-            relief=tk.FLAT,
-            bd=0,
-            padx=self._scale(2),
-            pady=0,
-            cursor="hand2",
+            font_box, text="A-", font=("Microsoft YaHei UI", 8, "bold"),
+            bg=self.theme["btn_bg"], fg=self.theme["btn_fg"],
+            relief=tk.GROOVE, padx=self._scale(4), pady=0, cursor="hand2",
             command=lambda: self._apply_font_scale(self.font_scale_level - 1)
         )
         self.btn_font_dec.pack(side=tk.LEFT)
-        self._apply_interactive_effect(self.btn_font_dec)
 
         percent_map = {-2: "80%", -1: "90%", 0: "100%", 1: "115%", 2: "130%", 3: "150%", 4: "180%"}
         self.lbl_font_scale = tk.Label(
-            self.font_box,
-            text=percent_map.get(self.font_scale_level, "100%"),
-            bg=self.theme["sidebar"],
-            fg=self.theme["primary"],
-            font=self.bold_font,
-            width=5
+            font_box, text=percent_map.get(self.font_scale_level, "100%"),
+            bg=self.theme["bg"], fg=self.theme["text_muted"],
+            font=("Microsoft YaHei UI", 8)
         )
         self.lbl_font_scale.pack(side=tk.LEFT, padx=self._scale(2))
 
         self.btn_font_inc = tk.Button(
-            self.font_box,
-            text="＋",
-            font=("Segoe UI", 9, "bold"),
-            width=2,
-            bg=self.theme["btn_bg"],
-            fg=self.theme["primary"],
-            relief=tk.FLAT,
-            bd=0,
-            padx=self._scale(2),
-            pady=0,
-            cursor="hand2",
+            font_box, text="A+", font=("Microsoft YaHei UI", 8, "bold"),
+            bg=self.theme["btn_bg"], fg=self.theme["btn_fg"],
+            relief=tk.GROOVE, padx=self._scale(4), pady=0, cursor="hand2",
             command=lambda: self._apply_font_scale(self.font_scale_level + 1)
         )
         self.btn_font_inc.pack(side=tk.LEFT)
-        self._apply_interactive_effect(self.btn_font_inc)
 
-        # 2. Traffic Dashboard Bar (Upper Banner Layout)
-        self.traffic_bar = tk.Frame(
-            main_box,
-            bg=self.theme["sidebar"],
-            bd=0,
-            relief=tk.FLAT,
-            highlightthickness=1,
-            highlightbackground=self.theme["border"],
-            padx=self._scale(12),
-            pady=self._scale(5)
-        )
-        self.traffic_bar.pack(fill=tk.X, side=tk.TOP, padx=self._scale(12), pady=(0, self._scale(5)))
+        # Top Bar Left Controls
+        title_lbl = ttk.Label(top_bar, text="⚡ Clash 节点跃迁", style="Header.TLabel")
+        title_lbl.pack(side=tk.LEFT, padx=(0, self._scale(12)))
 
-        # Left Container (Controls & Period)
-        traffic_left = tk.Frame(self.traffic_bar, bg=self.traffic_bar["bg"])
-        traffic_left.pack(side=tk.LEFT, fill=tk.Y)
+        ttk.Label(top_bar, text="配置:").pack(side=tk.LEFT, padx=(0, self._scale(4)))
+        self.profile_combo = ttk.Combobox(top_bar, state="readonly", width=22)
+        self.profile_combo.pack(side=tk.LEFT, padx=(0, self._scale(6)))
+        self.profile_combo.bind("<<ComboboxSelected>>", self._on_profile_selected)
+        self._bind_combobox_click_to_open(self.profile_combo)
 
-        self.btn_traffic_toggle = tk.Button(
-            traffic_left,
-            text="🟢 监控中" if self.traffic_enabled else "⏸️ 已暂停",
-            bg="#ecfdf5" if self.traffic_enabled else "#f1f5f9",
-            fg=self.theme["success"] if self.traffic_enabled else self.theme["text_muted"],
+        self.reload_profile_btn = ttk.Button(top_bar, text="🔄 重新加载", command=self._reload_profile)
+        self.reload_profile_btn.pack(side=tk.LEFT, padx=(0, self._scale(8)))
+
+        # Real-time speed badge in top_bar (fills the large blank header space between reload button and font size!)
+        ttk.Separator(top_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=self._scale(8))
+
+        self.speed_frame = tk.Frame(top_bar, bg=self.theme["bg"])
+        self.speed_frame.pack(side=tk.LEFT, padx=(self._scale(4), self._scale(8)))
+
+        self.lbl_speed_title = tk.Label(
+            self.speed_frame,
+            text="⚡ 实时网速:",
             font=self.bold_font,
-            relief=tk.FLAT,
-            bd=0,
-            padx=self._scale(8),
-            pady=self._scale(2),
-            cursor="hand2",
-            command=self._toggle_traffic_monitoring
+            bg=self.theme["bg"],
+            fg=self.theme["text"]
         )
-        self.btn_traffic_toggle.pack(side=tk.LEFT, padx=(0, self._scale(6)))
+        self.lbl_speed_title.pack(side=tk.LEFT, padx=(0, self._scale(5)))
 
-        self.btn_traffic_reset = tk.Button(
-            traffic_left,
-            text="🔄 清零",
-            bg=self.theme["btn_bg"],
-            fg=self.theme["btn_fg"],
-            font=self.default_font,
-            relief=tk.FLAT,
-            bd=0,
-            padx=self._scale(8),
-            pady=self._scale(2),
-            cursor="hand2",
-            command=self._reset_traffic_stats
-        )
-        self.btn_traffic_reset.pack(side=tk.LEFT, padx=(0, self._scale(6)))
-
-        self.btn_traffic_date = tk.Button(
-            traffic_left,
-            text="📅 周期设定",
-            bg=self.theme["btn_bg"],
-            fg=self.theme["btn_fg"],
-            font=self.default_font,
-            relief=tk.FLAT,
-            bd=0,
-            padx=self._scale(8),
-            pady=self._scale(2),
-            cursor="hand2",
-            command=self._action_set_custom_traffic_period
-        )
-        self.btn_traffic_date.pack(side=tk.LEFT, padx=(0, self._scale(8)))
-
-        self._apply_interactive_effect(self.btn_traffic_toggle)
-        self._apply_interactive_effect(self.btn_traffic_reset)
-        self._apply_interactive_effect(self.btn_traffic_date)
-
-        self.lbl_traffic_period = tk.Label(
-            traffic_left,
-            text=self._get_traffic_period_text(),
-            bg=self.traffic_bar["bg"],
-            fg=self.theme["text_muted"],
-            font=self.default_font
-        )
-        self.lbl_traffic_period.pack(side=tk.LEFT)
-
-        # Right Container (Live Real-Time Speed Badge - Pinned to Far Right)
-        traffic_right = tk.Frame(self.traffic_bar, bg=self.traffic_bar["bg"])
-        traffic_right.pack(side=tk.RIGHT, fill=tk.Y)
-
-        self.speed_card = tk.Frame(
-            traffic_right,
-            bg=self.theme["card_bg"],
-            bd=0,
-            relief=tk.FLAT,
-            highlightthickness=1,
-            highlightbackground=self.theme["border"],
-            padx=self._scale(12),
-            pady=self._scale(4)
-        )
-        self.speed_card.pack(side=tk.RIGHT, pady=self._scale(1))
-
-        self.lbl_traffic_speed = tk.Label(
-            self.speed_card,
-            text="⚡ 实时网速: ↑ 0 B/s   ↓ 0 B/s",
+        self.lbl_speed_up = tk.Label(
+            self.speed_frame,
+            text="↑ 0 B/s",
             font=self.bold_font,
-            fg=self.theme["primary"],
-            bg=self.theme["card_bg"]
+            bg=self.theme["bg"],
+            fg=self.theme.get("primary", "#2563eb")
         )
-        self.lbl_traffic_speed.pack()
+        self.lbl_speed_up.pack(side=tk.LEFT, padx=(0, self._scale(6)))
 
-        # Center Container (Traffic totals - Clash Total & Proxy Nodes, LEFT-ALIGNED in Middle)
-        traffic_mid = tk.Frame(self.traffic_bar, bg=self.traffic_bar["bg"])
-        traffic_mid.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(self._scale(18), self._scale(14)))
-
-        self.lbl_traffic_total = tk.Label(
-            traffic_mid,
-            text="🌐 Clash总吞吐: [上行] 0 B | [下行] 0 B (⚡ 累计: 0 B)",
-            bg=self.traffic_bar["bg"],
-            fg=self.theme["primary"],
+        self.lbl_speed_down = tk.Label(
+            self.speed_frame,
+            text="↓ 0 B/s",
             font=self.bold_font,
-            anchor="w",
-            justify=tk.LEFT
+            bg=self.theme["bg"],
+            fg=self.theme.get("success", "#059669")
         )
-        self.lbl_traffic_total.pack(side=tk.TOP, fill=tk.X, anchor="w")
+        self.lbl_speed_down.pack(side=tk.LEFT)
 
-        self.lbl_traffic_proxy = tk.Label(
-            traffic_mid,
-            text="🚀 节点代理实耗: [上行] 0 B | [下行] 0 B (⚡ 消耗: 0 B)",
-            bg=self.traffic_bar["bg"],
-            fg="#059669",
-            font=self.bold_font,
-            anchor="w",
-            justify=tk.LEFT
-        )
-        self.lbl_traffic_proxy.pack(side=tk.TOP, fill=tk.X, anchor="w")
-
-        # 3. Action Toolbar - Row 1 (节点导入与测速管理)
+        # 2. Action Toolbar - Row 1 (节点导入与测速管理)
         self.toolbar_row1 = tk.Frame(
             main_box,
             bg=self.theme["card_bg"],
-            bd=0,
-            relief=tk.FLAT,
-            highlightthickness=1,
-            highlightbackground=self.theme["border"],
+            bd=1,
+            relief=tk.SOLID,
             padx=self._scale(10),
             pady=self._scale(5)
         )
@@ -1041,7 +840,7 @@ class ClashNodeManagerApp:
             fg="#ffffff",
             font=self.bold_font,
             relief=tk.FLAT,
-            padx=self._scale(14),
+            padx=self._scale(12),
             pady=btn_pad_y,
             cursor="hand2",
             command=self._action_manual_save
@@ -1091,8 +890,7 @@ class ClashNodeManagerApp:
             bg=self.theme["btn_bg"],
             fg=self.theme["btn_fg"],
             font=self.default_font,
-            relief=tk.FLAT,
-            bd=0,
+            relief=tk.GROOVE,
             padx=self._scale(6),
             pady=btn_pad_y,
             cursor="hand2",
@@ -1108,8 +906,7 @@ class ClashNodeManagerApp:
             bg="#ecfdf5",
             fg="#059669",
             font=self.bold_font,
-            relief=tk.FLAT,
-            bd=0,
+            relief=tk.GROOVE,
             padx=btn_pad_x,
             pady=btn_pad_y,
             cursor="hand2",
@@ -1154,7 +951,7 @@ class ClashNodeManagerApp:
 
         # Left: Groups Sidebar
         left_frame = ttk.Frame(paned, style="Sidebar.TFrame", padding=(self._scale(8), self._scale(8)))
-        paned.add(left_frame, minsize=self._scale(240), width=self._scale(290))
+        paned.add(left_frame, minsize=self._scale(200), width=self._scale(235))
 
         grp_header_frame = ttk.Frame(left_frame, style="Sidebar.TFrame")
         grp_header_frame.pack(fill=tk.X, pady=(0, self._scale(4)))
@@ -1167,7 +964,7 @@ class ClashNodeManagerApp:
         self.btn_add_grp = tk.Button(
             grp_btn_frame, text="➕ 新建", font=self.default_font,
             bg=self.theme["btn_bg"], fg=self.theme["btn_fg"],
-            relief=tk.FLAT, bd=0, padx=self._scale(8), pady=1, cursor="hand2",
+            relief=tk.GROOVE, padx=self._scale(8), pady=1, cursor="hand2",
             command=self._action_create_group
         )
         self.btn_add_grp.pack(side=tk.LEFT, padx=(0, self._scale(4)))
@@ -1175,7 +972,7 @@ class ClashNodeManagerApp:
         self.btn_ren_grp = tk.Button(
             grp_btn_frame, text="✏️ 改名", font=self.default_font,
             bg=self.theme["btn_bg"], fg=self.theme["btn_fg"],
-            relief=tk.FLAT, bd=0, padx=self._scale(8), pady=1, cursor="hand2",
+            relief=tk.GROOVE, padx=self._scale(8), pady=1, cursor="hand2",
             command=self._action_rename_group
         )
         self.btn_ren_grp.pack(side=tk.LEFT, padx=(0, self._scale(4)))
@@ -1183,7 +980,7 @@ class ClashNodeManagerApp:
         self.btn_del_grp = tk.Button(
             grp_btn_frame, text="🗑 删除", font=self.default_font,
             bg=self.theme["btn_bg"], fg=self.theme["danger"],
-            relief=tk.FLAT, bd=0, padx=self._scale(8), pady=1, cursor="hand2",
+            relief=tk.GROOVE, padx=self._scale(8), pady=1, cursor="hand2",
             command=self._action_delete_group
         )
         self.btn_del_grp.pack(side=tk.LEFT)
@@ -1198,7 +995,7 @@ class ClashNodeManagerApp:
         self.btn_grp_top = tk.Button(
             grp_order_frame, text="⭐ 置顶", font=self.bold_font,
             bg="#fef3c7", fg="#b45309",
-            relief=tk.FLAT, bd=0, padx=self._scale(4), pady=1, cursor="hand2",
+            relief=tk.GROOVE, padx=self._scale(4), pady=1, cursor="hand2",
             command=self._action_group_pin_top
         )
         self.btn_grp_top.grid(row=0, column=0, sticky="ew", padx=(0, self._scale(2)))
@@ -1207,7 +1004,7 @@ class ClashNodeManagerApp:
         self.btn_grp_up = tk.Button(
             grp_order_frame, text="⬆ 上移", font=self.default_font,
             bg=self.theme["btn_bg"], fg=self.theme["btn_fg"],
-            relief=tk.FLAT, bd=0, padx=self._scale(4), pady=1, cursor="hand2",
+            relief=tk.GROOVE, padx=self._scale(4), pady=1, cursor="hand2",
             command=self._action_group_move_up
         )
         self.btn_grp_up.grid(row=0, column=1, sticky="ew", padx=(self._scale(2), self._scale(2)))
@@ -1216,7 +1013,7 @@ class ClashNodeManagerApp:
         self.btn_grp_down = tk.Button(
             grp_order_frame, text="⬇ 下移", font=self.default_font,
             bg=self.theme["btn_bg"], fg=self.theme["btn_fg"],
-            relief=tk.FLAT, bd=0, padx=self._scale(4), pady=1, cursor="hand2",
+            relief=tk.GROOVE, padx=self._scale(4), pady=1, cursor="hand2",
             command=self._action_group_move_down
         )
         self.btn_grp_down.grid(row=0, column=2, sticky="ew", padx=(self._scale(2), 0))
@@ -1229,11 +1026,10 @@ class ClashNodeManagerApp:
             grp_list_frame,
             selectmode=tk.SINGLE,
             font=self.default_font,
-            bd=0,
-            relief=tk.FLAT,
+            bd=1,
+            relief=tk.SOLID,
             activestyle="none",
             highlightthickness=1,
-            highlightbackground=self.theme["border"],
             highlightcolor=self.COLOR_PRIMARY,
             bg="#ffffff"
         )
@@ -1271,22 +1067,36 @@ class ClashNodeManagerApp:
 
         # Right: Node Table
         right_frame = ttk.Frame(paned, padding=(self._scale(8), self._scale(8)))
-        paned.add(right_frame, minsize=self._scale(520))
+        paned.add(right_frame, minsize=self._scale(460))
 
-        table_top_frame = ttk.Frame(right_frame)
-        table_top_frame.pack(fill=tk.X, pady=(0, self._scale(6)))
+        # Row 1: Group Title (Left) and Search Box (Right) - NEVER squeezed!
+        group_header_bar = ttk.Frame(right_frame)
+        group_header_bar.pack(fill=tk.X, pady=(0, self._scale(4)))
 
-        self.group_title_lbl = ttk.Label(table_top_frame, text="请在左侧选择分组", font=self.bold_font)
-        self.group_title_lbl.pack(side=tk.LEFT, padx=(0, self._scale(8)))
+        # Search Box packed FIRST on side=RIGHT so it is NEVER clipped or squeezed
+        search_frame = ttk.Frame(group_header_bar)
+        search_frame.pack(side=tk.RIGHT)
+        self.lbl_search = ttk.Label(search_frame, text="🔍 快速过滤:", font=self.default_font)
+        self.lbl_search.pack(side=tk.LEFT, padx=(0, self._scale(4)))
+        self.search_var = tk.StringVar()
+        self.search_var.trace_add("write", lambda *args: self._filter_nodes())
+        self.search_box = ttk.Entry(search_frame, textvariable=self.search_var, width=16, font=self.default_font)
+        self.search_box.pack(side=tk.LEFT)
+
+        self.group_title_lbl = ttk.Label(group_header_bar, text="请在左侧选择分组", font=self.bold_font)
+        self.group_title_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # Row 2: Node Action Buttons Toolbar (Dedicated row, plenty of space!)
+        node_action_bar = ttk.Frame(right_frame)
+        node_action_bar.pack(fill=tk.X, pady=(0, self._scale(6)))
 
         self.btn_top = tk.Button(
-            table_top_frame,
+            node_action_bar,
             text="⭐ 置顶",
             bg="#fef3c7",
             fg="#b45309",
             font=self.bold_font,
-            relief=tk.FLAT,
-            bd=0,
+            relief=tk.GROOVE,
             padx=self._scale(6),
             pady=1,
             cursor="hand2",
@@ -1295,13 +1105,12 @@ class ClashNodeManagerApp:
         self.btn_top.pack(side=tk.LEFT, padx=(0, self._scale(3)))
 
         self.btn_up = tk.Button(
-            table_top_frame,
+            node_action_bar,
             text="⬆ 上移",
             bg=self.theme["btn_bg"],
             fg=self.theme["btn_fg"],
             font=self.default_font,
-            relief=tk.FLAT,
-            bd=0,
+            relief=tk.GROOVE,
             padx=self._scale(6),
             pady=1,
             cursor="hand2",
@@ -1310,30 +1119,28 @@ class ClashNodeManagerApp:
         self.btn_up.pack(side=tk.LEFT, padx=(0, self._scale(3)))
 
         self.btn_down = tk.Button(
-            table_top_frame,
+            node_action_bar,
             text="⬇ 下移",
             bg=self.theme["btn_bg"],
             fg=self.theme["btn_fg"],
             font=self.default_font,
-            relief=tk.FLAT,
-            bd=0,
+            relief=tk.GROOVE,
             padx=self._scale(6),
             pady=1,
             cursor="hand2",
             command=self._action_move_down
         )
-        self.btn_down.pack(side=tk.LEFT, padx=(0, self._scale(5)))
+        self.btn_down.pack(side=tk.LEFT, padx=(0, self._scale(6)))
 
-        ttk.Separator(table_top_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=self._scale(4))
+        ttk.Separator(node_action_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=self._scale(4))
 
         self.btn_edit_node = tk.Button(
-            table_top_frame,
-            text="✏️ 改名/编辑 (F2)",
+            node_action_bar,
+            text="✏️ 编辑节点 (F2)",
             bg=self.theme["btn_bg"],
             fg=self.theme["btn_fg"],
             font=self.default_font,
-            relief=tk.FLAT,
-            bd=0,
+            relief=tk.GROOVE,
             padx=self._scale(6),
             pady=1,
             cursor="hand2",
@@ -1342,13 +1149,12 @@ class ClashNodeManagerApp:
         self.btn_edit_node.pack(side=tk.LEFT, padx=(0, self._scale(3)))
 
         self.btn_del = tk.Button(
-            table_top_frame,
-            text="🗑 删除 (Del)",
+            node_action_bar,
+            text="🗑 移除节点 (Del)",
             bg="#fee2e2",
             fg=self.COLOR_DANGER,
             font=self.default_font,
-            relief=tk.FLAT,
-            bd=0,
+            relief=tk.GROOVE,
             padx=self._scale(6),
             pady=1,
             cursor="hand2",
@@ -1357,13 +1163,12 @@ class ClashNodeManagerApp:
         self.btn_del.pack(side=tk.LEFT, padx=(0, self._scale(3)))
 
         self.btn_clear_grp_nodes = tk.Button(
-            table_top_frame,
+            node_action_bar,
             text="🧹 清空当前组",
             bg=self.theme["btn_bg"],
             fg=self.theme["text_muted"],
             font=self.default_font,
-            relief=tk.FLAT,
-            bd=0,
+            relief=tk.GROOVE,
             padx=self._scale(6),
             pady=1,
             cursor="hand2",
@@ -1377,16 +1182,6 @@ class ClashNodeManagerApp:
         self._apply_interactive_effect(self.btn_edit_node)
         self._apply_interactive_effect(self.btn_del, hover_bg="#fecaca", active_bg="#f87171")
         self._apply_interactive_effect(self.btn_clear_grp_nodes)
-
-        # Right: Search Box
-        search_frame = ttk.Frame(table_top_frame)
-        search_frame.pack(side=tk.RIGHT)
-        self.lbl_search = ttk.Label(search_frame, text="🔍 快速过滤:", font=self.default_font)
-        self.lbl_search.pack(side=tk.LEFT, padx=(0, self._scale(4)))
-        self.search_var = tk.StringVar()
-        self.search_var.trace_add("write", lambda *args: self._filter_nodes())
-        self.search_box = ttk.Entry(search_frame, textvariable=self.search_var, width=18, font=self.default_font)
-        self.search_box.pack(side=tk.LEFT)
 
         table_frame = ttk.Frame(right_frame)
         table_frame.pack(fill=tk.BOTH, expand=True)
@@ -1407,21 +1202,21 @@ class ClashNodeManagerApp:
         self.node_tree.heading("server", text="服务器 / 域名", anchor=tk.W)
         self.node_tree.heading("port", text="端口", anchor=tk.CENTER)
 
-        self.node_tree.column("index", width=self._scale(45), minwidth=self._scale(40), anchor=tk.CENTER)
-        self.node_tree.column("status", width=self._scale(75), minwidth=self._scale(60), anchor=tk.CENTER)
-        self.node_tree.column("name", width=self._scale(310), minwidth=self._scale(180), anchor=tk.W)
-        self.node_tree.column("delay", width=self._scale(115), minwidth=self._scale(95), anchor=tk.CENTER)
-        self.node_tree.column("type", width=self._scale(90), minwidth=self._scale(65), anchor=tk.CENTER)
-        self.node_tree.column("server", width=self._scale(220), minwidth=self._scale(140), anchor=tk.W)
-        self.node_tree.column("port", width=self._scale(65), minwidth=self._scale(50), anchor=tk.CENTER)
+        self.node_tree.column("index", width=self._scale(40), minwidth=self._scale(35), anchor=tk.CENTER, stretch=False)
+        self.node_tree.column("status", width=self._scale(65), minwidth=self._scale(55), anchor=tk.CENTER, stretch=False)
+        self.node_tree.column("name", width=self._scale(240), minwidth=self._scale(140), anchor=tk.W, stretch=True)
+        self.node_tree.column("delay", width=self._scale(95), minwidth=self._scale(80), anchor=tk.CENTER, stretch=False)
+        self.node_tree.column("type", width=self._scale(85), minwidth=self._scale(65), anchor=tk.CENTER, stretch=False)
+        self.node_tree.column("server", width=self._scale(180), minwidth=self._scale(110), anchor=tk.W, stretch=True)
+        self.node_tree.column("port", width=self._scale(60), minwidth=self._scale(50), anchor=tk.CENTER, stretch=False)
 
         tree_scroll_y = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.node_tree.yview)
         tree_scroll_x = ttk.Scrollbar(table_frame, orient=tk.HORIZONTAL, command=self.node_tree.xview)
         self.node_tree.configure(yscrollcommand=tree_scroll_y.set, xscrollcommand=tree_scroll_x.set)
 
-        self.node_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         tree_scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
         tree_scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
+        self.node_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         # Modern Mac-style Context Menu for Node Tree
         self.context_menu = tk.Menu(self.root, **menu_kwargs)
@@ -1444,16 +1239,7 @@ class ClashNodeManagerApp:
         self.node_tree.bind("<Double-1>", lambda event: self._action_edit_node())
 
         # 5. Bottom Status Bar (Status message & Core connection tip)
-        self.status_bar = tk.Frame(
-            main_box,
-            bg=self.theme["sidebar"],
-            bd=0,
-            relief=tk.FLAT,
-            highlightthickness=1,
-            highlightbackground=self.theme["border"],
-            padx=self._scale(10),
-            pady=self._scale(4)
-        )
+        self.status_bar = tk.Frame(main_box, bg=self.theme["sidebar"], bd=1, relief=tk.SOLID, padx=self._scale(10), pady=self._scale(4))
         self.status_bar.pack(fill=tk.X, side=tk.BOTTOM)
 
         self.status_msg_lbl = tk.Label(
@@ -1467,7 +1253,7 @@ class ClashNodeManagerApp:
 
         self.lbl_status_info = tk.Label(
             self.status_bar,
-            text="⚡ 内核联动正常 | v1.2.0 (2026.09.07) | 双击行编辑节点",
+            text="⚡ 内核联动正常 | v1.2.1 (2026.09.08) | 双击行编辑节点",
             bg=self.status_bar["bg"],
             fg=self.theme["text_muted"],
             font=self.default_font
@@ -1491,12 +1277,84 @@ class ClashNodeManagerApp:
         color = self.COLOR_DANGER if is_error else "#1e293b"
         self.status_msg_lbl.config(text=text, foreground=color)
 
-    def _on_window_close(self):
-        self.traffic_running = False
+    def _start_speed_monitor(self):
+        self.speed_running = True
+        self._latest_speed = (0, 0)
+        self.speed_thread = threading.Thread(target=self._speed_monitor_loop, daemon=True)
+        self.speed_thread.start()
+        self._poll_speed_ui()
+
+    def _poll_speed_ui(self):
+        if not getattr(self, "speed_running", False):
+            return
+        up, down = getattr(self, "_latest_speed", (0, 0))
+        self._update_speed_ui(up, down)
+        if hasattr(self, "root") and self.root.winfo_exists():
+            self.root.after(1000, self._poll_speed_ui)
+
+    @staticmethod
+    def _format_speed(b_s: float) -> str:
+        if b_s < 1024:
+            return f"{b_s:.0f} B/s"
+        elif b_s < 1024 * 1024:
+            return f"{b_s / 1024:.1f} KB/s"
+        elif b_s < 1024 * 1024 * 1024:
+            return f"{b_s / (1024 * 1024):.2f} MB/s"
+        else:
+            return f"{b_s / (1024 * 1024 * 1024):.2f} GB/s"
+
+    def _update_speed_ui(self, up_bytes: float, down_bytes: float):
+        if not hasattr(self, "lbl_speed_up") or not hasattr(self, "lbl_speed_down"):
+            return
         try:
-            self._save_traffic_state()
+            if not hasattr(self, "root") or not self.root.winfo_exists():
+                return
+            up_str = f"↑ {self._format_speed(up_bytes)}"
+            down_str = f"↓ {self._format_speed(down_bytes)}"
+            self.lbl_speed_up.config(text=up_str)
+            self.lbl_speed_down.config(text=down_str)
         except Exception:
             pass
+
+    def _speed_monitor_loop(self):
+        pipe_path = r'\\.\pipe\verge-mihomo'
+        while self.speed_running:
+            pipe_file = None
+            try:
+                pipe_file = open(pipe_path, 'r+b', buffering=0)
+                pipe_file.write(b'GET /traffic HTTP/1.1\r\nHost: localhost\r\n\r\n')
+                # Read HTTP headers until empty line
+                while self.speed_running:
+                    line = pipe_file.readline()
+                    if line == b'\r\n' or not line:
+                        break
+                # Stream chunks
+                while self.speed_running:
+                    len_str = pipe_file.readline().strip()
+                    if not len_str:
+                        break
+                    try:
+                        chunk_len = int(len_str, 16)
+                    except ValueError:
+                        break
+                    if chunk_len <= 0:
+                        break
+                    data = pipe_file.read(chunk_len)
+                    pipe_file.read(2)  # skip \r\n
+                    obj = json.loads(data.decode('utf-8', errors='ignore'))
+                    self._latest_speed = (obj.get("up", 0), obj.get("down", 0))
+            except Exception:
+                self._latest_speed = (0, 0)
+                time.sleep(2.0)
+            finally:
+                if pipe_file:
+                    try:
+                        pipe_file.close()
+                    except Exception:
+                        pass
+
+    def _on_window_close(self):
+        self.speed_running = False
         if self._save_timer is not None:
             try:
                 self.root.after_cancel(self._save_timer)
@@ -1954,8 +1812,7 @@ class ClashNodeManagerApp:
             bg=self.theme["btn_bg"],
             fg=self.theme["btn_fg"],
             font=self.default_font,
-            relief=tk.FLAT,
-            bd=0,
+            relief=tk.GROOVE,
             padx=self._scale(10),
             pady=self._scale(4),
             cursor="hand2",
@@ -2031,8 +1888,7 @@ class ClashNodeManagerApp:
             bg="#f0fdf4",
             fg="#15803d",
             font=self.default_font,
-            relief=tk.FLAT,
-            bd=0,
+            relief=tk.GROOVE,
             padx=self._scale(8),
             pady=self._scale(3),
             cursor="hand2",
@@ -2466,7 +2322,7 @@ class ClashNodeManagerApp:
         form.columnconfigure(1, weight=1)
 
         # ⚡ Dedicated Multi-Mode Ping Test Card in Node Editor!
-        ping_card = tk.Frame(content, bg="#f8fafc", bd=0, relief=tk.FLAT, highlightthickness=1, highlightbackground="#e2e8f0", padx=self._scale(12), pady=self._scale(10))
+        ping_card = tk.Frame(content, bg="#f8fafc", bd=1, relief=tk.SOLID, padx=self._scale(12), pady=self._scale(10))
         ping_card.pack(fill=tk.X, pady=(self._scale(4), self._scale(10)))
 
         cur_cached_delay = self.node_delays.get(target_name)
@@ -2549,8 +2405,7 @@ class ClashNodeManagerApp:
             bg="#ecfdf5",
             fg="#059669",
             font=self.bold_font,
-            relief=tk.FLAT,
-            bd=0,
+            relief=tk.GROOVE,
             padx=self._scale(12),
             pady=self._scale(3),
             cursor="hand2",
@@ -2665,7 +2520,7 @@ class ClashNodeManagerApp:
 
         # Open Source Support Box
         box_bg = self.theme["sidebar"]
-        sponsor_box = tk.Frame(card, bg=box_bg, bd=0, relief=tk.FLAT, highlightthickness=1, highlightbackground=self.theme["border"], padx=self._scale(14), pady=self._scale(12))
+        sponsor_box = tk.Frame(card, bg=box_bg, bd=1, relief=tk.SOLID, padx=self._scale(14), pady=self._scale(12))
         sponsor_box.pack(fill=tk.X, pady=(0, 16))
 
         tk.Label(
@@ -2752,10 +2607,8 @@ class ClashNodeManagerApp:
             font=self.default_font,
             bg=self.theme["card_bg"],
             fg=self.theme["text"],
-            bd=0,
-            relief=tk.FLAT,
-            highlightthickness=1,
-            highlightbackground=self.theme["border"],
+            bd=1,
+            relief=tk.SOLID,
             padx=self._scale(8),
             pady=self._scale(6)
         )
@@ -2822,8 +2675,7 @@ class ClashNodeManagerApp:
             bg=self.theme["btn_bg"],
             fg=self.theme["btn_fg"],
             font=self.default_font,
-            relief=tk.FLAT,
-            bd=0,
+            relief=tk.GROOVE,
             padx=self._scale(12),
             pady=self._scale(4),
             cursor="hand2",
@@ -3077,294 +2929,6 @@ class ClashNodeManagerApp:
         save_settings({"bg_image_path": ""})
         self._update_status("已恢复经典浅白默认纯色皮肤")
         messagebox.showinfo("已恢复", "已清除图片壁纸皮肤，恢复经典浅白纯色主题！")
-
-    def _get_traffic_period_text(self) -> str:
-        st = getattr(self, "traffic_start_time", 0)
-        if st <= 0:
-            try:
-                import ctypes
-                uptime_ms = ctypes.windll.kernel32.GetTickCount64()
-                st = time.time() - (uptime_ms / 1000.0)
-            except Exception:
-                st = time.time()
-            self.traffic_start_time = st
-        st_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(st))
-        if self.traffic_enabled:
-            return f"📅 {st_str} 至 至今"
-        else:
-            return f"📅 {st_str} (已暂停)"
-
-    def _update_traffic_period_display(self):
-        if hasattr(self, "lbl_traffic_period") and self.lbl_traffic_period:
-            self.lbl_traffic_period.config(text=self._get_traffic_period_text())
-
-    def _toggle_traffic_monitoring(self):
-        self.traffic_enabled = not self.traffic_enabled
-        self._save_traffic_state()
-        if self.traffic_enabled:
-            self.btn_traffic_toggle.config(
-                text="🟢 监控中",
-                bg="#ecfdf5",
-                fg=self.theme["success"]
-            )
-            self._start_traffic_worker()
-            self._update_status("已开启实时流量监控")
-        else:
-            self.traffic_running = False
-            self.btn_traffic_toggle.config(
-                text="⏸️ 已暂停",
-                bg=self.theme["btn_bg"],
-                fg=self.theme["text_muted"]
-            )
-            if hasattr(self, "lbl_traffic_speed") and self.lbl_traffic_speed:
-                self.lbl_traffic_speed.config(text="⚡ 实时网速: (已暂停)")
-            self._update_status("已暂停实时流量监控")
-        self._update_traffic_period_display()
-
-    def _save_traffic_state(self):
-        data = {
-            "traffic_start_time": self.traffic_start_time,
-            "traffic_lifetime_up": getattr(self, "traffic_lifetime_up", 0),
-            "traffic_lifetime_down": getattr(self, "traffic_lifetime_down", 0),
-            "traffic_session_base_up": getattr(self, "traffic_session_base_up", 0),
-            "traffic_session_base_down": getattr(self, "traffic_session_base_down", 0),
-            "traffic_last_core_up": getattr(self, "traffic_last_core_up", 0),
-            "traffic_last_core_down": getattr(self, "traffic_last_core_down", 0),
-            "traffic_proxy_lifetime_up": getattr(self, "traffic_proxy_lifetime_up", 0),
-            "traffic_proxy_lifetime_down": getattr(self, "traffic_proxy_lifetime_down", 0),
-            "traffic_enabled": self.traffic_enabled
-        }
-        save_settings(data)
-
-    def _reset_traffic_stats(self):
-        snap = self.cm.get_runtime_traffic_snapshot()
-        cur_up = snap["total_up"] if snap else 0
-        cur_down = snap["total_down"] if snap else 0
-        self.traffic_start_time = time.time()
-        self.traffic_lifetime_up = 0
-        self.traffic_lifetime_down = 0
-        self.traffic_session_base_up = cur_up
-        self.traffic_session_base_down = cur_down
-        self.traffic_last_core_up = cur_up
-        self.traffic_last_core_down = cur_down
-        self.traffic_proxy_lifetime_up = 0
-        self.traffic_proxy_lifetime_down = 0
-        self._save_traffic_state()
-        self._update_traffic_period_display()
-        if hasattr(self, "lbl_traffic_total") and self.lbl_traffic_total:
-            self.lbl_traffic_total.config(text="🌐 Clash总吞吐: [上行] 0 B | [下行] 0 B (⚡ 累计: 0 B)")
-        if hasattr(self, "lbl_traffic_proxy") and self.lbl_traffic_proxy:
-            self.lbl_traffic_proxy.config(text="🚀 节点代理实耗: [上行] 0 B | [下行] 0 B (⚡ 消耗: 0 B)")
-        self._update_status("已将全部流量统计清零，起始时间已更新为当前时刻！")
-
-    def _action_set_custom_traffic_period(self):
-        diag = tk.Toplevel(self.root)
-        diag.title("📅 设定流量统计周期")
-        diag.transient(self.root)
-        diag.grab_set()
-        diag.resizable(False, False)
-        
-        frame = ttk.Frame(diag, padding=self._scale(16))
-        frame.pack(fill=tk.BOTH, expand=True)
-
-        ttk.Label(
-            frame,
-            text="选择或自定义你的流量统计起始时间：\n(统计不受开关机、关闭软件影响，永久真实累计)",
-            font=self.bold_font
-        ).pack(anchor="w", pady=(0, self._scale(12)))
-
-        now = time.localtime()
-        # Month 1st
-        m1_ts = time.mktime((now.tm_year, now.tm_mon, 1, 0, 0, 0, 0, 0, -1))
-        m1_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(m1_ts))
-        
-        # Today 00:00
-        td_ts = time.mktime((now.tm_year, now.tm_mon, now.tm_mday, 0, 0, 0, 0, 0, -1))
-        td_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(td_ts))
-
-        # Boot time
-        try:
-            import ctypes
-            uptime_ms = ctypes.windll.kernel32.GetTickCount64()
-            boot_ts = time.time() - (uptime_ms / 1000.0)
-        except Exception:
-            boot_ts = time.time()
-        boot_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(boot_ts))
-
-        def apply_ts(ts):
-            self.traffic_start_time = ts
-            self._save_traffic_state()
-            self._update_traffic_period_display()
-            self._update_status(f"已更新统计起始时间为: {time.strftime('%Y-%m-%d %H:%M', time.localtime(ts))}")
-            diag.destroy()
-
-        def apply_now_reset():
-            diag.destroy()
-            self._reset_traffic_stats()
-
-        ttk.Button(
-            frame,
-            text=f"📅 从本月 1 号开始 ({m1_str}) - 月度套餐推荐",
-            command=lambda: apply_ts(m1_ts)
-        ).pack(fill=tk.X, pady=self._scale(4))
-
-        ttk.Button(
-            frame,
-            text=f"📅 从今天 00:00 开始 ({td_str}) - 日度统计",
-            command=lambda: apply_ts(td_ts)
-        ).pack(fill=tk.X, pady=self._scale(4))
-
-        ttk.Button(
-            frame,
-            text=f"💻 从本次电脑开机开始 ({boot_str})",
-            command=lambda: apply_ts(boot_ts)
-        ).pack(fill=tk.X, pady=self._scale(4))
-
-        ttk.Button(
-            frame,
-            text="🔄 此时此刻立即清零重新起算",
-            command=apply_now_reset
-        ).pack(fill=tk.X, pady=self._scale(4))
-
-        # Custom entry
-        custom_box = ttk.LabelFrame(frame, text="✏️ 自定义起始时间 (格式: YYYY-MM-DD HH:MM)", padding=self._scale(8))
-        custom_box.pack(fill=tk.X, pady=(self._scale(10), 0))
-
-        cur_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(self.traffic_start_time))
-        entry_var = tk.StringVar(value=cur_str)
-        entry = ttk.Entry(custom_box, textvariable=entry_var, font=self.default_font)
-        entry.pack(fill=tk.X, pady=(0, self._scale(8)))
-
-        def apply_custom():
-            s = entry_var.get().strip()
-            try:
-                t_struct = time.strptime(s, "%Y-%m-%d %H:%M")
-                ts = time.mktime(t_struct)
-                apply_ts(ts)
-            except Exception as e:
-                messagebox.showerror("格式错误", f"请输入正确的日期时间格式：YYYY-MM-DD HH:MM\n例如: 2026-09-01 00:00\n错误详情: {e}")
-
-        ttk.Button(custom_box, text="应用自定义时间", command=apply_custom).pack(anchor="e")
-
-    def _start_traffic_worker(self):
-        if self.traffic_running:
-            return
-        self.traffic_running = True
-        self.traffic_thread = threading.Thread(target=self._traffic_worker_loop, daemon=True)
-        self.traffic_thread.start()
-
-    def _traffic_worker_loop(self):
-        def fmt_bytes(n):
-            if n < 1024:
-                return f"{n} B"
-            elif n < 1024 * 1024:
-                return f"{n/1024:.1f} KB"
-            elif n < 1024 * 1024 * 1024:
-                return f"{n/(1024*1024):.2f} MB"
-            else:
-                return f"{n/(1024*1024*1024):.2f} GB"
-
-        def fmt_speed(n):
-            if n < 1024:
-                return f"{n:.0f} B/s"
-            elif n < 1024 * 1024:
-                return f"{n/1024:.1f} KB/s"
-            else:
-                return f"{n/(1024*1024):.2f} MB/s"
-
-        active_proxy_conns = {}
-        save_counter = 0
-        last_snap_time = None
-        last_calc_up = None
-        last_calc_down = None
-
-        while self.traffic_running and self.traffic_enabled:
-            snap = self.cm.get_runtime_traffic_snapshot()
-            if snap:
-                cur_up = snap["total_up"]
-                cur_down = snap["total_down"]
-                raw_proxy_conns = snap.get("proxy_conns", [])
-                now_t = snap.get("timestamp", time.time())
-
-                # Rate computation
-                rate_up = 0.0
-                rate_down = 0.0
-                if last_snap_time is not None and last_calc_up is not None and last_calc_down is not None:
-                    dt = max(0.2, now_t - last_snap_time)
-                    if cur_up >= last_calc_up and cur_down >= last_calc_down:
-                        rate_up = (cur_up - last_calc_up) / dt
-                        rate_down = (cur_down - last_calc_down) / dt
-
-                last_snap_time = now_t
-                last_calc_up = cur_up
-                last_calc_down = cur_down
-
-                # Total traffic computation (retains continuity across PC reboots and Clash restarts)
-                if cur_up < getattr(self, "traffic_last_core_up", 0):
-                    self.traffic_lifetime_up += max(0, self.traffic_last_core_up - self.traffic_session_base_up)
-                    self.traffic_lifetime_down += max(0, self.traffic_last_core_down - self.traffic_session_base_down)
-                    self.traffic_session_base_up = 0
-                    self.traffic_session_base_down = 0
-
-                self.traffic_last_core_up = cur_up
-                self.traffic_last_core_down = cur_down
-
-                disp_total_up = self.traffic_lifetime_up + max(0, cur_up - self.traffic_session_base_up)
-                disp_total_down = self.traffic_lifetime_down + max(0, cur_down - self.traffic_session_base_down)
-
-                # Accurate Proxy Node traffic accumulation across active & closed connections
-                current_seen = {}
-                for c in raw_proxy_conns:
-                    cid = c.get("id")
-                    if cid:
-                        current_seen[cid] = (c.get("upload", 0), c.get("download", 0))
-
-                for cid, (last_u, last_d) in active_proxy_conns.items():
-                    if cid not in current_seen:
-                        self.traffic_proxy_lifetime_up += last_u
-                        self.traffic_proxy_lifetime_down += last_d
-
-                active_proxy_conns = current_seen
-
-                live_proxy_u = sum(u for u, d in active_proxy_conns.values())
-                live_proxy_d = sum(d for u, d in active_proxy_conns.values())
-
-                disp_proxy_up = self.traffic_proxy_lifetime_up + live_proxy_u
-                disp_proxy_down = self.traffic_proxy_lifetime_down + live_proxy_d
-
-                save_counter += 1
-                if save_counter >= 5:
-                    save_counter = 0
-                    try:
-                        self._save_traffic_state()
-                    except Exception:
-                        pass
-
-                def update_ui(tu=disp_total_up, td=disp_total_down, pu=disp_proxy_up, pd=disp_proxy_down, ru=rate_up, rd=rate_down):
-                    if not self.traffic_running:
-                        return
-                    if hasattr(self, "lbl_traffic_total") and self.lbl_traffic_total:
-                        total_bytes = tu + td
-                        self.lbl_traffic_total.config(
-                            text=f"🌐 Clash总吞吐: [上行] {fmt_bytes(tu)} | [下行] {fmt_bytes(td)} (⚡ 累计: {fmt_bytes(total_bytes)})"
-                        )
-                    if hasattr(self, "lbl_traffic_proxy") and self.lbl_traffic_proxy:
-                        proxy_bytes = pu + pd
-                        self.lbl_traffic_proxy.config(
-                            text=f"🚀 节点代理实耗: [上行] {fmt_bytes(pu)} | [下行] {fmt_bytes(pd)} (⚡ 消耗: {fmt_bytes(proxy_bytes)})"
-                        )
-                    if hasattr(self, "lbl_traffic_speed") and self.lbl_traffic_speed:
-                        self.lbl_traffic_speed.config(
-                            text=f"⚡ 实时网速: ↑ {fmt_speed(ru)}   ↓ {fmt_speed(rd)}"
-                        )
-                    self._update_traffic_period_display()
-
-                try:
-                    self.root.after(0, update_ui)
-                except Exception:
-                    break
-
-            time.sleep(1.0)
 
     def _reload_current_group_data(self):
         if self.current_group_name:

@@ -1026,51 +1026,6 @@ class ConfigManager:
             del stream_buf[:chunk_size + 2]
         return bytes(body_acc)
 
-
-    def get_runtime_traffic_snapshot(self) -> Optional[Dict[str, Any]]:
-        """
-        Polls Mihomo via named pipe for bidirectional total and proxy traffic.
-        Completely non-resident: only called when GUI is actively polling.
-        """
-        with self._pipe_lock:
-            try:
-                with open(r"\\.\pipe\verge-mihomo", "r+b", buffering=0) as pipe:
-                    pipe.write(b"GET /connections HTTP/1.1\r\nHost: localhost\r\n\r\n")
-                    raw = self._read_pipe_http_payload(pipe)
-                    data = json.loads(raw.decode("utf-8", errors="ignore"))
-                    
-                    up_total = int(data.get("uploadTotal", 0))
-                    down_total = int(data.get("downloadTotal", 0))
-                    conns = data.get("connections", [])
-                    
-                    proxy_conns = []
-                    proxy_up = 0
-                    proxy_down = 0
-                    for c in conns:
-                        chains = c.get("chains", [])
-                        if any(ch not in ["DIRECT", "REJECT", "GLOBAL", "COMPATIBLE", "PASS"] for ch in chains):
-                            u = c.get("upload", 0)
-                            d = c.get("download", 0)
-                            proxy_up += u
-                            proxy_down += d
-                            proxy_conns.append({
-                                "id": c.get("id", ""),
-                                "upload": u,
-                                "download": d
-                            })
-                            
-                    return {
-                        "total_up": up_total,
-                        "total_down": down_total,
-                        "proxy_up": proxy_up,
-                        "proxy_down": proxy_down,
-                        "proxy_conns": proxy_conns,
-                        "active_conns": len(conns),
-                        "timestamp": time.time()
-                    }
-            except Exception:
-                return None
-
     def test_proxy_true_delay(
         self,
         proxy_name: str,
