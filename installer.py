@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # ClashNodeX Modern Setup Wizard (安装向导)
-# 版本: v1.2.1 (Build 2026.09.08)
+# 版本: v1.3.0 (Build 2026.09.09)
 # 纯白/浅灰现代极客风格 · 无黑边 · 驱动器可视化空间卡片 · 零闪烁平滑启动 · 2K/3K/4K 高分屏自适应等比放大
 
 import os
@@ -60,32 +60,42 @@ def get_drives_info():
                 usage = shutil.disk_usage(root)
                 free_gb = usage.free / (1024 ** 3)
                 total_gb = usage.total / (1024 ** 3)
-                used_pct = int(((total_gb - free_gb) / total_gb) * 100) if total_gb > 0 else 0
+                used_gb = total_gb - free_gb
+                used_pct = (used_gb / total_gb) * 100 if total_gb > 0 else 0
                 drives.append({
                     'letter': letter,
                     'root': root,
                     'free_gb': free_gb,
                     'total_gb': total_gb,
-                    'used_pct': max(0, min(100, used_pct)),
-                    'is_system': (letter.upper() == 'C')
+                    'used_pct': used_pct,
+                    'is_system': letter.upper() == 'C'
                 })
             except Exception:
                 pass
     return drives
 
 
+def get_default_install_dir():
+    candidates = ['D:\\Program Files\\ClashNodeX',
+                  'E:\\Program Files\\ClashNodeX',
+                  'F:\\Program Files\\ClashNodeX']
+    for c in candidates:
+        drive = c[:3]
+        if os.path.exists(drive):
+            try:
+                usage = shutil.disk_usage(drive)
+                if usage.free > 1 * (1024 ** 3):
+                    return c
+            except Exception:
+                pass
+    return 'C:\\Program Files\\ClashNodeX'
+
+
 def get_all_desktop_paths():
     paths = []
-    try:
-        res = subprocess.run(
-            ['powershell', '-NoProfile', '-Command', '[Environment]::GetFolderPath([Environment+SpecialFolder]::Desktop)'],
-            capture_output=True, text=True, creationflags=0x08000000, timeout=3
-        )
-        p = res.stdout.strip()
-        if p and os.path.exists(p) and p not in paths:
-            paths.append(p)
-    except Exception:
-        pass
+    dp = os.path.join(os.environ.get('USERPROFILE', ''), 'Desktop')
+    if os.path.exists(dp):
+        paths.append(dp)
 
     up = os.path.join(os.path.expanduser('~'), 'Desktop')
     if os.path.exists(up) and up not in paths:
@@ -106,7 +116,7 @@ class ClashNodeXInstaller(tk.Tk):
 
         self.scale = get_screen_scale_factor()
 
-        self.title('Clash 节点跃迁 (ClashNodeX) v1.2.1 - 安装向导')
+        self.title('Clash 节点跃迁 (ClashNodeX) v1.3.0 - 安装向导')
         
         # Grand, expansive, high-DPI modern window size (base 960x640, scaled by DPI)
         sw = self.winfo_screenwidth()
@@ -262,7 +272,7 @@ class ClashNodeXInstaller(tk.Tk):
         # Version Pill Badge
         badge_frame = tk.Frame(top_hero, bg='#E0F2FE', padx=self._scale(10), pady=self._scale(4))
         badge_frame.pack(anchor=tk.W)
-        lbl_badge = tk.Label(badge_frame, text='⚡ v1.2.1 (Build 2026.09.08)',
+        lbl_badge = tk.Label(badge_frame, text='⚡ v1.3.0 (Build 2026.09.09)',
                              font=self.font_badge,
                              fg='#0369A1', bg='#E0F2FE')
         lbl_badge.pack()
@@ -625,7 +635,7 @@ class ClashNodeXInstaller(tk.Tk):
             with open(guide_path, 'w', encoding='utf-8') as f:
                 f.write(
 '===================================================================\n'
-'⚡ Clash 节点跃迁 (ClashNodeX) v1.2.1 (Build 2026.09.08)\n'
+'⚡ Clash 节点跃迁 (ClashNodeX) v1.3.0 (Build 2026.09.09)\n'
 'Clash Verge 专属极客管家 · 智能节点跃迁与多维精准测速切换\n'
 '===================================================================\n\n'
 '【核心功能亮点】\n'
@@ -747,7 +757,7 @@ class ClashNodeXInstaller(tk.Tk):
 
         tk.Label(hero_box, text='🎉 安装顺利完成！',
                  font=self.font_title, fg='#059669', bg='#FFFFFF').pack(anchor=tk.W)
-        tk.Label(hero_box, text=f'Clash 节点跃迁 (ClashNodeX) v1.2.1 已就绪并部署至:\n{dest_dir}',
+        tk.Label(hero_box, text=f'Clash 节点跃迁 (ClashNodeX) v1.3.0 已就绪并部署至:\n{dest_dir}',
                  font=self.font_small, fg='#334155', bg='#FFFFFF', justify=tk.LEFT).pack(anchor=tk.W, pady=(self._scale(5), 0))
 
         # Path Card with Open Directory Button

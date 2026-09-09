@@ -13,6 +13,7 @@ Key Features:
 
 import os
 import sys
+import re
 import ctypes
 import threading
 import socket
@@ -22,17 +23,18 @@ import ssl
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-# Enable Windows High DPI Awareness before Tkinter starts
-try:
-    ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
-except Exception:
+# Enable Windows High DPI Awareness before Tkinter starts (Windows only)
+if sys.platform == "win32":
     try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
     except Exception:
         try:
-            ctypes.windll.user32.SetProcessDPIAware()
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
         except Exception:
-            pass
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()
+            except Exception:
+                pass
 
 import tkinter as tk
 import json
@@ -43,35 +45,57 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
-from PIL import ImageGrab
-from link_parser import parse_single_link, parse_batch_text, fetch_subscription_url, decode_qr_image, parse_qr_image
-from config_manager import ConfigManager, load_settings, save_settings
+from PIL import Image, ImageTk, ImageGrab
+from link_parser import (
+    parse_single_link, parse_batch_text, fetch_subscription_url,
+    decode_qr_image, parse_qr_image,
+    export_proxy_to_link, export_proxies_to_links,
+    export_proxies_to_subscription_base64, export_proxies_to_yaml_snippet,
+    generate_proxy_qr_image
+)
+from config_manager import ConfigManager, load_settings, save_settings, open_in_file_manager
 
 
 def get_screen_scale_factor() -> float:
-    try:
-        user32 = ctypes.windll.user32
-        gdi32 = ctypes.windll.gdi32
-        hdc = user32.GetDC(0)
-        dpi = gdi32.GetDeviceCaps(hdc, 88)
-        user32.ReleaseDC(0, hdc)
-        return max(1.0, dpi / 96.0)
-    except Exception:
-        return 1.0
+    if sys.platform == "win32":
+        try:
+            user32 = ctypes.windll.user32
+            gdi32 = ctypes.windll.gdi32
+            hdc = user32.GetDC(0)
+            dpi = gdi32.GetDeviceCaps(hdc, 88)
+            user32.ReleaseDC(0, hdc)
+            return max(1.0, dpi / 96.0)
+        except Exception:
+            return 1.0
+    return 1.0
 
 
 def center_window(win: tk.Toplevel, parent, width: int, height: int):
     """
     Intelligently centers a Toplevel modal window over its parent window,
     completely preventing dialogs from appearing in far or disconnected screen corners.
+    Falls back gracefully to screen center if parent geometry is invalid.
     """
     win.update_idletasks()
-    pw = parent.winfo_width()
-    ph = parent.winfo_height()
-    px = parent.winfo_rootx()
-    py = parent.winfo_rooty()
-    x = px + max(10, (pw - width) // 2)
-    y = py + max(10, (ph - height) // 2)
+    sw = win.winfo_screenwidth()
+    sh = win.winfo_screenheight()
+    try:
+        pw = parent.winfo_width()
+        ph = parent.winfo_height()
+        px = parent.winfo_rootx()
+        py = parent.winfo_rooty()
+        if pw > 100 and ph > 100:
+            x = px + max(10, (pw - width) // 2)
+            y = py + max(10, (ph - height) // 2)
+        else:
+            x = max(10, (sw - width) // 2)
+            y = max(10, (sh - height) // 2)
+    except Exception:
+        x = max(10, (sw - width) // 2)
+        y = max(10, (sh - height) // 2)
+
+    x = max(10, min(x, max(10, sw - width - 20)))
+    y = max(10, min(y, max(10, sh - height - 40)))
     win.geometry(f"{width}x{height}+{x}+{y}")
 
 
@@ -321,6 +345,559 @@ class CustomInputDialog(tk.Toplevel):
         self.destroy()
 
 
+class QRCodeBigViewDialog(tk.Toplevel):
+    """
+    Dedicated large modal dialog for QR code viewing and phone scanning.
+    Features:
+    - Extra large, crisp, high-contrast QR code (320px - 420px)
+    - Node name, protocol tag, server & port display
+    - One-click copy link & save HD image
+    - Auto centered & stays on top
+    - Press ESC or click Close to dismiss
+    """
+    def __init__(self, parent, proxy: dict, qr_data: str, scale_factor: float = 1.0):
+        super().__init__(parent)
+        self.proxy = proxy or {}
+        self.qr_data = qr_data or ""
+        self.scale = scale_factor
+        self.qr_big_photo = None
+        self.qr_big_img = None
+
+        name = self.proxy.get("name", "未命名节点")
+        self.title(f"🔍 节点专属大图二维码 - {name}")
+        self.transient(parent)
+        self.grab_set()
+        self.configure(bg="#ffffff")
+
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        target_w = min(int(round(460 * self.scale)), int(sw * 0.95))
+        target_h = min(int(round(560 * self.scale)), int(sh * 0.92))
+        center_window(self, parent, target_w, target_h)
+        self.resizable(False, False)
+
+        font_family = "PingFang SC" if sys.platform == "darwin" else "Microsoft YaHei UI"
+        f_title = (font_family, 11, "bold")
+        f_sub = (font_family, 9)
+        f_btn = (font_family, 10)
+
+        container = tk.Frame(self, bg="#ffffff", padx=int(round(20 * self.scale)), pady=int(round(16 * self.scale)))
+        container.pack(fill=tk.BOTH, expand=True)
+
+        p_type = str(self.proxy.get("type", "proxy")).upper()
+        server = self.proxy.get("server", "")
+        port = self.proxy.get("port", "")
+
+        tk.Label(
+            container,
+            text=f"【{p_type}】 {name}",
+            font=f_title,
+            bg="#ffffff",
+            fg="#0f172a",
+            wraplength=int(round(410 * self.scale)),
+            justify=tk.CENTER
+        ).pack(pady=(0, int(round(3 * self.scale))))
+
+        tk.Label(
+            container,
+            text=f"节点地址: {server}:{port}",
+            font=f_sub,
+            bg="#ffffff",
+            fg="#64748b"
+        ).pack(pady=(0, int(round(8 * self.scale))))
+
+        # Big QR Code Box
+        qr_box = tk.Frame(container, bg="#ffffff", bd=1, relief=tk.SOLID, padx=int(round(10 * self.scale)), pady=int(round(10 * self.scale)))
+        qr_box.pack(pady=(0, int(round(10 * self.scale))))
+
+        qr_size = min(int(round(300 * self.scale)), int(sw * 0.8), int(sh * 0.52))
+        pil_img = generate_proxy_qr_image(self.qr_data, box_size=8, border=2)
+        if pil_img:
+            self.qr_big_img = pil_img
+            pil_resized = pil_img.resize((qr_size, qr_size), Image.Resampling.NEAREST)
+            self.qr_big_photo = ImageTk.PhotoImage(pil_resized, master=self)
+            lbl_img = tk.Label(qr_box, image=self.qr_big_photo, bg="#ffffff")
+            lbl_img.image = self.qr_big_photo
+            lbl_img.pack()
+        else:
+            tk.Label(qr_box, text="二维码生成失败", bg="#ffffff", fg="#ef4444", padx=20, pady=20).pack()
+
+        tk.Label(
+            container,
+            text="📱 请使用手机相机或代理客户端直接扫描上方大图二维码",
+            font=f_sub,
+            bg="#ffffff",
+            fg="#0284c7"
+        ).pack(pady=(0, int(round(12 * self.scale))))
+
+        btn_row = tk.Frame(container, bg="#ffffff")
+        btn_row.pack(fill=tk.X)
+
+        tk.Button(
+            btn_row,
+            text="📋 复制链接",
+            font=f_btn,
+            bg="#0284c7",
+            fg="#ffffff",
+            activebackground="#0369a1",
+            activeforeground="#ffffff",
+            relief=tk.FLAT,
+            bd=0,
+            padx=int(round(10 * self.scale)),
+            pady=int(round(5 * self.scale)),
+            cursor="hand2",
+            command=self._copy_link
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+
+        tk.Button(
+            btn_row,
+            text="💾 保存图片",
+            font=f_btn,
+            bg="#f1f5f9",
+            fg="#0f172a",
+            activebackground="#e2e8f0",
+            relief=tk.GROOVE,
+            padx=int(round(10 * self.scale)),
+            pady=int(round(5 * self.scale)),
+            cursor="hand2",
+            command=self._save_img
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+
+        tk.Button(
+            btn_row,
+            text="关闭 (Esc)",
+            font=f_btn,
+            bg="#f8fafc",
+            fg="#64748b",
+            activebackground="#e2e8f0",
+            relief=tk.GROOVE,
+            padx=int(round(10 * self.scale)),
+            pady=int(round(5 * self.scale)),
+            cursor="hand2",
+            command=self.destroy
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        self.bind("<Escape>", lambda e: self.destroy())
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+        self.attributes("-topmost", True)
+
+    def destroy(self):
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+        super().destroy()
+
+    def _copy_link(self):
+        if self.qr_data:
+            self.clipboard_clear()
+            self.clipboard_append(self.qr_data)
+            messagebox.showinfo("复制成功", "节点链接已成功复制到剪贴板！", parent=self)
+
+    def _save_img(self):
+        if not self.qr_big_img:
+            messagebox.showwarning("提示", "当前无有效二维码图片。", parent=self)
+            return
+        name = self.proxy.get("name", "node")
+        safe_name = re.sub(r'[\\/:*?"<>|]', '_', name)
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="保存高清二维码大图",
+            initialfile=f"{safe_name}_qr_hd.png",
+            defaultextension=".png",
+            filetypes=[("PNG Image", "*.png"), ("All Files", "*.*")]
+        )
+        if path:
+            try:
+                self.qr_big_img.save(path)
+                messagebox.showinfo("保存成功", f"二维码大图已保存至:\n{os.path.basename(path)}", parent=self)
+            except Exception as e:
+                messagebox.showerror("保存失败", f"保存出错: {e}", parent=self)
+
+
+class ShareNodeDialog(tk.Toplevel):
+    """
+    Modern modal dialog for sharing and exporting selected proxy nodes:
+    - QR Code generation & display (high-res, crisp, centered)
+    - Full protocol link (vless://, vmess://, trojan://, ss://, hysteria2://, tuic://)
+    - Single node view or multi-node dropdown switcher
+    - One-click copy link, copy Base64 subscription, copy Clash YAML
+    - Save QR code as PNG image
+    - Batch export for multiple nodes
+    """
+    def __init__(self, parent, proxies: List[Dict[str, Any]], scale_factor: float = 1.0, theme: Optional[dict] = None):
+        super().__init__(parent)
+        self.parent = parent
+        self.proxies = [p for p in proxies if isinstance(p, dict)]
+        self.scale = scale_factor
+        self.theme = theme or THEMES["default_light"]
+        self.current_idx = 0
+        self.qr_photo = None  # Hold reference to prevent GC
+        self.current_link = ""
+        self.current_qr_img = None
+
+        self.title("🔗 节点分享与二维码 - ClashNodeX")
+        self.transient(parent)
+        self.grab_set()
+        self.configure(bg="#ffffff")
+
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        target_w = min(self._scale(520), int(sw * 0.95))
+        target_h = min(self._scale(640), int(sh * 0.88))
+        center_window(self, parent, target_w, target_h)
+        self.minsize(self._scale(440), self._scale(520))
+
+        font_family = "PingFang SC" if sys.platform == "darwin" else "Microsoft YaHei UI"
+        self.font_title = (font_family, 12, "bold")
+        self.font_subtitle = (font_family, 10, "bold")
+        self.font_body = (font_family, 10)
+        self.font_code = ("Consolas" if sys.platform == "win32" else ("Menlo" if sys.platform == "darwin" else "Courier"), 9)
+        self.font_small = (font_family, 9)
+
+        self._build_ui()
+        self._render_current_proxy()
+
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+        self.attributes("-topmost", True)
+
+    def destroy(self):
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+        super().destroy()
+
+    def _scale(self, val: int) -> int:
+        return int(round(val * self.scale))
+
+    def _build_ui(self):
+        container = tk.Frame(self, bg="#ffffff", padx=self._scale(20), pady=self._scale(16))
+        container.pack(fill=tk.BOTH, expand=True)
+
+        # 1. Header with Node Selector if multiple nodes selected
+        top_bar = tk.Frame(container, bg="#ffffff")
+        top_bar.pack(fill=tk.X, pady=(0, self._scale(10)))
+
+        if len(self.proxies) > 1:
+            lbl_sel = tk.Label(
+                top_bar,
+                text=f"已选 {len(self.proxies)} 个节点，切换查看二维码与配置:",
+                font=self.font_small,
+                bg="#ffffff",
+                fg="#64748b"
+            )
+            lbl_sel.pack(anchor=tk.W, pady=(0, self._scale(2)))
+
+            node_names = [f"{i+1}. [{p.get('type','').upper()}] {p.get('name','')}" for i, p in enumerate(self.proxies)]
+            self.cb_nodes = ttk.Combobox(top_bar, values=node_names, state="readonly", font=self.font_body)
+            self.cb_nodes.pack(fill=tk.X)
+            self.cb_nodes.current(0)
+            self.cb_nodes.bind("<<ComboboxSelected>>", self._on_node_selected)
+        else:
+            tk.Label(
+                top_bar,
+                text="⚡ 节点分享与二维码",
+                font=self.font_title,
+                bg="#ffffff",
+                fg="#0f172a"
+            ).pack(anchor=tk.W)
+
+        # 2. QR Code Display Card
+        qr_card = tk.Frame(container, bg="#f8fafc", bd=1, relief=tk.SOLID, padx=self._scale(12), pady=self._scale(10))
+        qr_card.pack(fill=tk.X, pady=(0, self._scale(8)))
+
+        self.lbl_node_header = tk.Label(
+            qr_card,
+            text="",
+            font=self.font_subtitle,
+            bg="#f8fafc",
+            fg="#0f172a",
+            wraplength=self._scale(480),
+            justify=tk.CENTER
+        )
+        self.lbl_node_header.pack(pady=(0, self._scale(6)))
+
+        self.qr_canvas_lbl = tk.Label(qr_card, bg="#ffffff", bd=1, relief=tk.SOLID, cursor="hand2")
+        self.qr_canvas_lbl.pack(pady=(0, self._scale(6)))
+        self.qr_canvas_lbl.bind("<Button-1>", lambda e: self._action_popup_big_qr())
+
+        btn_big_qr = tk.Button(
+            qr_card,
+            text="🔍 弹出专属大图弹窗 (点击放大扫码)",
+            font=self.font_small,
+            bg="#eff6ff",
+            fg="#2563eb",
+            activebackground="#dbeafe",
+            activeforeground="#1d4ed8",
+            relief=tk.FLAT,
+            bd=1,
+            padx=self._scale(10),
+            pady=self._scale(3),
+            cursor="hand2",
+            command=self._action_popup_big_qr
+        )
+        btn_big_qr.pack(pady=(0, self._scale(4)))
+
+        self.lbl_qr_hint = tk.Label(
+            qr_card,
+            text="📱 手机扫码导入：v2rayNG / Shadowrocket / Sing-box / Clash 等客户端均可识别",
+            font=self.font_small,
+            bg="#f8fafc",
+            fg="#64748b"
+        )
+        self.lbl_qr_hint.pack()
+
+        # 3. Share Link Text Entry
+        link_box = tk.Frame(container, bg="#ffffff")
+        link_box.pack(fill=tk.X, pady=(0, self._scale(10)))
+
+        tk.Label(
+            link_box,
+            text="🔗 节点链接 (Share Link):",
+            font=self.font_body,
+            bg="#ffffff",
+            fg="#334155"
+        ).pack(anchor=tk.W, pady=(0, self._scale(2)))
+
+        self.link_entry = ttk.Entry(link_box, font=self.font_code)
+        self.link_entry.pack(fill=tk.X)
+
+        # 4. Action Buttons (Single node actions)
+        btn_grid = tk.Frame(container, bg="#ffffff")
+        btn_grid.pack(fill=tk.X, pady=(0, self._scale(10)))
+
+        self.btn_copy_link = tk.Button(
+            btn_grid,
+            text="📋 复制节点链接",
+            font=self.font_body,
+            bg="#0284c7",
+            fg="#ffffff",
+            activebackground="#0369a1",
+            activeforeground="#ffffff",
+            relief=tk.FLAT,
+            bd=0,
+            padx=self._scale(12),
+            pady=self._scale(5),
+            cursor="hand2",
+            command=self._action_copy_link
+        )
+        self.btn_copy_link.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, self._scale(6)))
+
+        self.btn_save_qr = tk.Button(
+            btn_grid,
+            text="💾 保存二维码图片",
+            font=self.font_body,
+            bg="#f1f5f9",
+            fg="#0f172a",
+            activebackground="#e2e8f0",
+            relief=tk.GROOVE,
+            padx=self._scale(12),
+            pady=self._scale(5),
+            cursor="hand2",
+            command=self._action_save_qr
+        )
+        self.btn_save_qr.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, self._scale(6)))
+
+        self.btn_copy_yaml = tk.Button(
+            btn_grid,
+            text="📄 复制 Clash YAML",
+            font=self.font_body,
+            bg="#f1f5f9",
+            fg="#0f172a",
+            activebackground="#e2e8f0",
+            relief=tk.GROOVE,
+            padx=self._scale(12),
+            pady=self._scale(5),
+            cursor="hand2",
+            command=self._action_copy_yaml
+        )
+        self.btn_copy_yaml.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # 5. Batch Action Area (if multiple proxies)
+        if len(self.proxies) > 1:
+            batch_frame = tk.LabelFrame(
+                container,
+                text=f" 批量导出全部 {len(self.proxies)} 个选中节点 ",
+                font=self.font_small,
+                bg="#ffffff",
+                fg="#475569",
+                padx=self._scale(8),
+                pady=self._scale(8)
+            )
+            batch_frame.pack(fill=tk.X, pady=(0, self._scale(10)))
+
+            b_row = tk.Frame(batch_frame, bg="#ffffff")
+            b_row.pack(fill=tk.X)
+
+            btn_b_links = tk.Button(
+                b_row,
+                text="📋 批量复制全部链接",
+                font=self.font_small,
+                bg="#f8fafc",
+                fg="#0284c7",
+                relief=tk.GROOVE,
+                padx=self._scale(6),
+                pady=self._scale(3),
+                cursor="hand2",
+                command=self._action_batch_copy_links
+            )
+            btn_b_links.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+
+            btn_b_sub = tk.Button(
+                b_row,
+                text="⚡ 复制 Base64 订阅",
+                font=self.font_small,
+                bg="#f8fafc",
+                fg="#059669",
+                relief=tk.GROOVE,
+                padx=self._scale(6),
+                pady=self._scale(3),
+                cursor="hand2",
+                command=self._action_batch_copy_sub
+            )
+            btn_b_sub.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+
+            btn_b_yaml = tk.Button(
+                b_row,
+                text="📄 导出 Clash 配置块",
+                font=self.font_small,
+                bg="#f8fafc",
+                fg="#475569",
+                relief=tk.GROOVE,
+                padx=self._scale(6),
+                pady=self._scale(3),
+                cursor="hand2",
+                command=self._action_batch_copy_yaml
+            )
+            btn_b_yaml.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # 6. Status tip label at bottom
+        self.lbl_tip = tk.Label(
+            container,
+            text="提示：点击上方按钮即可一键复制或保存",
+            font=self.font_small,
+            bg="#ffffff",
+            fg="#059669"
+        )
+        self.lbl_tip.pack(pady=(self._scale(2), 0))
+
+    def _on_node_selected(self, event=None):
+        if not hasattr(self, "cb_nodes"):
+            return
+        idx = self.cb_nodes.current()
+        if 0 <= idx < len(self.proxies):
+            self.current_idx = idx
+            self._render_current_proxy()
+
+    def _render_current_proxy(self):
+        if not self.proxies or not (0 <= self.current_idx < len(self.proxies)):
+            return
+
+        p = self.proxies[self.current_idx]
+        name = p.get("name", "未命名节点")
+        p_type = str(p.get("type", "proxy")).upper()
+        server = p.get("server", "")
+        port = p.get("port", "")
+
+        self.lbl_node_header.config(text=f"【{p_type}】 {name}\n({server}:{port})")
+
+        link = export_proxy_to_link(p)
+        self.current_link = link
+        self.link_entry.delete(0, tk.END)
+        if link:
+            self.link_entry.insert(0, link)
+        else:
+            self.link_entry.insert(0, f"（此协议类型 {p_type} 暂不支持生成单链接，请使用下方 Clash YAML 配置）")
+
+        # Generate QR Code
+        qr_data = link if link else export_proxies_to_yaml_snippet([p])
+        pil_img = generate_proxy_qr_image(qr_data, box_size=5, border=2)
+        if pil_img:
+            target_size = self._scale(180)
+            pil_img_resized = pil_img.resize((target_size, target_size), Image.Resampling.NEAREST)
+            self.current_qr_img = pil_img
+            self.qr_photo = ImageTk.PhotoImage(pil_img_resized, master=self)
+            self.qr_canvas_lbl.config(image=self.qr_photo, text="")
+            self.qr_canvas_lbl.image = self.qr_photo
+        else:
+            self.qr_canvas_lbl.config(text="二维码生成失败", image="")
+
+        self.lbl_tip.config(text="提示：点击二维码或上方按钮可弹出专属大图，方便手机扫码", fg="#64748b")
+
+    def _action_popup_big_qr(self):
+        if not self.proxies or not (0 <= self.current_idx < len(self.proxies)):
+            return
+        p = self.proxies[self.current_idx]
+        qr_data = self.current_link if self.current_link else export_proxies_to_yaml_snippet([p])
+        QRCodeBigViewDialog(self, p, qr_data, scale_factor=self.scale)
+
+    def _action_copy_link(self):
+        if not self.current_link:
+            messagebox.showwarning("提示", "当前节点未能生成有效协议链接。")
+            return
+        self.clipboard_clear()
+        self.clipboard_append(self.current_link)
+        self.lbl_tip.config(text="✅ 节点链接已成功复制到剪贴板！", fg="#059669")
+
+    def _action_save_qr(self):
+        if not self.current_qr_img:
+            messagebox.showwarning("提示", "当前没有可保存的二维码图片。")
+            return
+        p = self.proxies[self.current_idx]
+        safe_name = re.sub(r'[\\/:*?"<>|]', '_', p.get("name", "node"))
+        default_filename = f"{safe_name}_{p.get('type', 'proxy')}_qr.png"
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="保存二维码图片",
+            initialfile=default_filename,
+            defaultextension=".png",
+            filetypes=[("PNG Image", "*.png"), ("All Files", "*.*")]
+        )
+        if path:
+            try:
+                self.current_qr_img.save(path)
+                self.lbl_tip.config(text=f"✅ 二维码已成功保存至: {os.path.basename(path)}", fg="#059669")
+            except Exception as e:
+                messagebox.showerror("保存失败", f"保存二维码文件出错: {e}")
+
+    def _action_copy_yaml(self):
+        p = self.proxies[self.current_idx]
+        yaml_text = export_proxies_to_yaml_snippet([p])
+        self.clipboard_clear()
+        self.clipboard_append(yaml_text)
+        self.lbl_tip.config(text="✅ 该节点 Clash YAML 配置片段已复制到剪贴板！", fg="#059669")
+
+    def _action_batch_copy_links(self):
+        links = export_proxies_to_links(self.proxies)
+        if not links:
+            messagebox.showwarning("提示", "未能生成任何节点的分享链接。")
+            return
+        text = "\n".join(links)
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self.lbl_tip.config(text=f"✅ 已成功批量复制全部 {len(links)} 个节点链接！", fg="#059669")
+
+    def _action_batch_copy_sub(self):
+        sub_text = export_proxies_to_subscription_base64(self.proxies)
+        if not sub_text:
+            messagebox.showwarning("提示", "生成 Base64 订阅失败。")
+            return
+        self.clipboard_clear()
+        self.clipboard_append(sub_text)
+        self.lbl_tip.config(text=f"✅ 已复制 {len(self.proxies)} 个节点的 Base64 订阅源字符串！", fg="#059669")
+
+    def _action_batch_copy_yaml(self):
+        yaml_text = export_proxies_to_yaml_snippet(self.proxies)
+        self.clipboard_clear()
+        self.clipboard_append(yaml_text)
+        self.lbl_tip.config(text=f"✅ 已复制 {len(self.proxies)} 个节点的 Clash proxies 配置块！", fg="#059669")
+
+
 THEMES = {
     "default_light": {
         "theme_id": "default_light",
@@ -408,15 +985,20 @@ class ClashNodeManagerApp:
         self.root = root
         self.scale = get_screen_scale_factor()
 
-        self.root.title("⚡ Clash 节点跃迁 (ClashNodeX) v1.2.1 (Build 2026.09.08) - Clash Verge 专属极客管家")
+        self.root.title("⚡ Clash 节点跃迁 (ClashNodeX) v1.3.0 (Build 2026.09.09) - Clash Verge 专属极客管家")
         
         # Load Circular Cyber Fox icon
         ico_file = os.path.join(getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))), "app_icon.ico")
-        if not os.path.exists(ico_file):
-            ico_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app_icon.ico")
-        if os.path.exists(ico_file):
+        png_file = os.path.join(getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))), "app_icon.png")
+        if sys.platform == "win32" and os.path.exists(ico_file):
             try:
                 self.root.iconbitmap(ico_file)
+            except Exception:
+                pass
+        elif os.path.exists(png_file):
+            try:
+                img_ico = tk.PhotoImage(file=png_file)
+                self.root.iconphoto(True, img_ico)
             except Exception:
                 pass
         
@@ -529,9 +1111,10 @@ class ClashNodeManagerApp:
     def _update_font_objects(self):
         font_map = {-2: 8, -1: 9, 0: 10, 1: 11, 2: 13, 3: 15, 4: 18}
         base_pt = font_map.get(self.font_scale_level, 10)
-        self.default_font = ("Microsoft YaHei UI", base_pt)
-        self.bold_font = ("Microsoft YaHei UI", base_pt, "bold")
-        self.title_font = ("Microsoft YaHei UI", int(base_pt * 1.3), "bold")
+        font_family = "PingFang SC" if sys.platform == "darwin" else "Microsoft YaHei UI"
+        self.default_font = (font_family, base_pt)
+        self.bold_font = (font_family, base_pt, "bold")
+        self.title_font = (font_family, int(base_pt * 1.3), "bold")
         self.root.option_add("*Font", self.default_font)
 
     def _apply_font_scale(self, level: int):
@@ -659,6 +1242,8 @@ class ClashNodeManagerApp:
             self.btn_down.configure(bg=self.theme["btn_bg"], fg=self.theme["btn_fg"])
         if hasattr(self, "btn_edit_node") and self.btn_edit_node:
             self.btn_edit_node.configure(bg=self.theme["btn_bg"], fg=self.theme["btn_fg"], font=self.default_font)
+        if hasattr(self, "btn_share_node") and self.btn_share_node:
+            self.btn_share_node.configure(bg="#e0f2fe", fg="#0284c7", font=self.bold_font)
         if hasattr(self, "btn_del") and self.btn_del:
             self.btn_del.configure(bg="#fee2e2", fg=self.COLOR_DANGER, font=self.default_font)
         if hasattr(self, "btn_clear_grp_nodes") and self.btn_clear_grp_nodes:
@@ -1148,6 +1733,34 @@ class ClashNodeManagerApp:
         )
         self.btn_edit_node.pack(side=tk.LEFT, padx=(0, self._scale(3)))
 
+        self.btn_share_node = tk.Button(
+            node_action_bar,
+            text="🔗 分享节点",
+            bg="#e0f2fe",
+            fg="#0284c7",
+            font=self.bold_font,
+            relief=tk.GROOVE,
+            padx=self._scale(8),
+            pady=1,
+            cursor="hand2",
+            command=self._action_share_selected_nodes
+        )
+        self.btn_share_node.pack(side=tk.LEFT, padx=(0, self._scale(3)))
+
+        self.btn_big_qr = tk.Button(
+            node_action_bar,
+            text="📱 专属大图",
+            bg="#f0fdf4",
+            fg="#16a34a",
+            font=self.bold_font,
+            relief=tk.GROOVE,
+            padx=self._scale(6),
+            pady=1,
+            cursor="hand2",
+            command=self._action_popup_big_qr_direct
+        )
+        self.btn_big_qr.pack(side=tk.LEFT, padx=(0, self._scale(3)))
+
         self.btn_del = tk.Button(
             node_action_bar,
             text="🗑 移除节点 (Del)",
@@ -1180,6 +1793,7 @@ class ClashNodeManagerApp:
         self._apply_interactive_effect(self.btn_up, hover_bg="#e2e8f0", active_bg="#94a3b8")
         self._apply_interactive_effect(self.btn_down, hover_bg="#e2e8f0", active_bg="#94a3b8")
         self._apply_interactive_effect(self.btn_edit_node)
+        self._apply_interactive_effect(self.btn_share_node, hover_bg="#bae6fd", active_bg="#7dd3fc")
         self._apply_interactive_effect(self.btn_del, hover_bg="#fecaca", active_bg="#f87171")
         self._apply_interactive_effect(self.btn_clear_grp_nodes)
 
@@ -1231,11 +1845,16 @@ class ClashNodeManagerApp:
         self.context_menu.add_command(label="  ✏️ 编辑节点属性与测速... (F2)", command=self._action_edit_node)
         self.context_menu.add_command(label="  📁 复制到其他分组...", command=self._action_copy_to_other_group)
         self.context_menu.add_separator()
+        self.context_menu.add_command(label="  🔍 弹出专属大图二维码 (手机扫码)...", command=self._action_popup_big_qr_direct)
+        self.context_menu.add_command(label="  🔗 分享与导出节点 (二维码/链接/YAML)...", command=self._action_share_selected_nodes)
+        self.context_menu.add_command(label="  📋 快速复制节点链接 (URL)", command=self._action_copy_node_links)
+        self.context_menu.add_separator()
         self.context_menu.add_command(label="  📷 识别二维码导入节点...", command=self._action_import_qr)
         self.context_menu.add_command(label="  🗑 从此分组移除 (Del)", command=self._action_delete_selected_nodes)
         self.context_menu.add_command(label="  ❌ 彻底删除此节点 (全局清除)", command=self._action_delete_completely)
 
         self.node_tree.bind("<Button-3>", self._on_tree_right_click)
+        self.node_tree.bind("<Button-2>", self._on_tree_right_click)
         self.node_tree.bind("<Double-1>", lambda event: self._action_edit_node())
 
         # 5. Bottom Status Bar (Status message & Core connection tip)
@@ -1253,7 +1872,7 @@ class ClashNodeManagerApp:
 
         self.lbl_status_info = tk.Label(
             self.status_bar,
-            text="⚡ 内核联动正常 | v1.2.1 (2026.09.08) | 双击行编辑节点",
+            text="⚡ 内核联动正常 | v1.3.0 (2026.09.09) | 支持二维码与链接分享",
             bg=self.status_bar["bg"],
             fg=self.theme["text_muted"],
             font=self.default_font
@@ -1261,10 +1880,16 @@ class ClashNodeManagerApp:
         self.lbl_status_info.pack(side=tk.RIGHT)
 
     def _bind_shortcuts(self):
+        # Windows / Linux Ctrl shortcuts
         self.root.bind("<Control-v>", lambda e: self._action_import_clipboard())
         self.root.bind("<Control-s>", lambda e: self._action_manual_save())
         self.root.bind("<Control-t>", lambda e: self._action_test_selected_latency())
         self.root.bind("<Control-T>", lambda e: self._action_test_selected_latency())
+        # macOS Command shortcuts
+        self.root.bind("<Command-v>", lambda e: self._action_import_clipboard())
+        self.root.bind("<Command-s>", lambda e: self._action_manual_save())
+        self.root.bind("<Command-t>", lambda e: self._action_test_selected_latency())
+        self.root.bind("<Command-T>", lambda e: self._action_test_selected_latency())
         self.root.bind("<Delete>", lambda e: self._action_delete_selected_nodes())
         self.root.bind("<F5>", lambda e: self._reload_profile())
         self.root.bind("<F2>", lambda e: self._action_edit_node())
@@ -1272,6 +1897,8 @@ class ClashNodeManagerApp:
         self.root.bind("<Alt-Down>", lambda e: self._action_move_down())
         self.group_listbox.bind("<Control-Up>", lambda e: self._action_group_move_up())
         self.group_listbox.bind("<Control-Down>", lambda e: self._action_group_move_down())
+        self.group_listbox.bind("<Command-Up>", lambda e: self._action_group_move_up())
+        self.group_listbox.bind("<Command-Down>", lambda e: self._action_group_move_down())
 
     def _update_status(self, text: str, is_error: bool = False):
         color = self.COLOR_DANGER if is_error else "#1e293b"
@@ -1552,6 +2179,112 @@ class ClashNodeManagerApp:
             if vals and len(vals) > 2:
                 names.append(vals[2])
         return names
+
+    def _get_selected_proxy_dicts(self) -> List[Dict[str, Any]]:
+        names = self._get_selected_node_names()
+        if not names:
+            return []
+
+        lookup: Dict[str, Dict[str, Any]] = {}
+        try:
+            if hasattr(self.cm, "get_proxy_map"):
+                lookup.update(self.cm.get_proxy_map())
+            elif hasattr(self.cm, "get_proxies"):
+                for p in self.cm.get_proxies():
+                    if isinstance(p, dict) and "name" in p:
+                        lookup[p["name"]] = p
+            elif hasattr(self.cm, "data") and isinstance(self.cm.data, dict):
+                for p in self.cm.data.get("proxies", []):
+                    if isinstance(p, dict) and "name" in p:
+                        lookup[p["name"]] = p
+        except Exception:
+            pass
+
+        if hasattr(self, "group_nodes_data") and self.group_nodes_data:
+            for p in self.group_nodes_data:
+                if isinstance(p, dict) and "name" in p:
+                    lookup[p["name"]] = p
+
+        res = []
+        for name in names:
+            if name in lookup:
+                res.append(lookup[name])
+            else:
+                for item in self.node_tree.selection():
+                    vals = self.node_tree.item(item, "values")
+                    if vals and len(vals) > 2 and vals[2] == name:
+                        p_type = vals[4] if len(vals) > 4 else "vless"
+                        p_server = vals[5] if len(vals) > 5 else ""
+                        p_port = int(vals[6]) if len(vals) > 6 and str(vals[6]).isdigit() else 443
+                        res.append({
+                            "name": name,
+                            "type": p_type,
+                            "server": p_server,
+                            "port": p_port
+                        })
+                        break
+        return res
+
+    def _action_share_selected_nodes(self):
+        try:
+            proxies = self._get_selected_proxy_dicts()
+            if not proxies:
+                children = self.node_tree.get_children()
+                if children:
+                    self.node_tree.selection_set(children[0])
+                    self.node_tree.focus(children[0])
+                    proxies = self._get_selected_proxy_dicts()
+            if not proxies:
+                messagebox.showinfo("提示", "当前分组下暂无任何节点，请先添加或导入节点后再分享！", parent=self.root)
+                return
+            ShareNodeDialog(self.root, proxies, scale_factor=self.scale, theme=self.theme)
+        except Exception as e:
+            traceback.print_exc()
+            messagebox.showerror("分享失败", f"打开节点分享弹窗出错: {e}", parent=self.root)
+
+    def _action_popup_big_qr_direct(self):
+        try:
+            proxies = self._get_selected_proxy_dicts()
+            if not proxies:
+                children = self.node_tree.get_children()
+                if children:
+                    self.node_tree.selection_set(children[0])
+                    self.node_tree.focus(children[0])
+                    proxies = self._get_selected_proxy_dicts()
+            if not proxies:
+                messagebox.showinfo("提示", "当前分组下暂无任何节点，请先添加或导入节点后再扫码！", parent=self.root)
+                return
+            p = proxies[0]
+            link = export_proxy_to_link(p)
+            qr_data = link if link else export_proxies_to_yaml_snippet([p])
+            QRCodeBigViewDialog(self.root, p, qr_data, scale_factor=self.scale)
+        except Exception as e:
+            traceback.print_exc()
+            messagebox.showerror("大图弹窗失败", f"弹出专属大图出错: {e}", parent=self.root)
+
+    def _action_copy_node_links(self):
+        try:
+            proxies = self._get_selected_proxy_dicts()
+            if not proxies:
+                children = self.node_tree.get_children()
+                if children:
+                    self.node_tree.selection_set(children[0])
+                    self.node_tree.focus(children[0])
+                    proxies = self._get_selected_proxy_dicts()
+            if not proxies:
+                messagebox.showinfo("提示", "当前分组下暂无任何节点，请先添加或导入节点后再复制链接！", parent=self.root)
+                return
+            links = export_proxies_to_links(proxies)
+            if not links:
+                messagebox.showwarning("提示", "选中的节点暂不支持转换或未能生成标准链接。", parent=self.root)
+                return
+            text = "\n".join(links)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self._update_status(f"✅ 已成功复制 {len(links)} 个节点的分享链接到剪贴板！")
+        except Exception as e:
+            traceback.print_exc()
+            messagebox.showerror("复制失败", f"复制节点链接出错: {e}", parent=self.root)
 
     def _on_tree_right_click(self, event):
         item = self.node_tree.identify_row(event.y)

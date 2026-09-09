@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+build/
+dist/
+.idea/
+.vscode/
+*.bak
+*.log
+settings.json

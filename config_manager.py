@@ -27,19 +27,50 @@ RESERVED_POLICY_NAMES = {"DIRECT", "REJECT", "GLOBAL", "COMPATIBLE", "PASS"}
 
 
 def get_settings_file_path() -> str:
-    appdata = os.environ.get("APPDATA")
-    if appdata:
-        app_dir = os.path.join(appdata, "ClashNodeX")
+    if sys.platform == "darwin":
+        home = os.path.expanduser("~")
+        app_dir = os.path.join(home, "Library", "Application Support", "ClashNodeX")
         try:
             os.makedirs(app_dir, exist_ok=True)
             return os.path.join(app_dir, "settings.json")
         except Exception:
             pass
+    elif sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            app_dir = os.path.join(appdata, "ClashNodeX")
+            try:
+                os.makedirs(app_dir, exist_ok=True)
+                return os.path.join(app_dir, "settings.json")
+            except Exception:
+                pass
+    else:
+        home = os.path.expanduser("~")
+        app_dir = os.path.join(home, ".config", "ClashNodeX")
+        try:
+            os.makedirs(app_dir, exist_ok=True)
+            return os.path.join(app_dir, "settings.json")
+        except Exception:
+            pass
+
     if getattr(sys, "frozen", False):
         base = os.path.dirname(os.path.abspath(sys.executable))
     else:
         base = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base, "settings.json")
+
+
+def open_in_file_manager(target_path: str):
+    """Opens a file or directory in the system's default file manager (Windows Explorer, macOS Finder, or Linux)."""
+    try:
+        if sys.platform == "win32":
+            os.startfile(target_path)
+        elif sys.platform == "darwin":
+            subprocess.run(["open", target_path])
+        else:
+            subprocess.run(["xdg-open", target_path])
+    except Exception as e:
+        print(f"[ConfigManager] Error opening path {target_path}: {e}")
 
 
 def load_settings() -> Dict[str, Any]:
@@ -83,12 +114,11 @@ def save_settings(data: Dict[str, Any]):
 
 def detect_clash_environment(explicit_dir: Optional[str] = None) -> Tuple[Optional[str], Optional[str]]:
     """
-    Zero-hardcoded dynamic detector for Clash Verge / Clash Verge Rev:
+    Zero-hardcoded dynamic detector for Clash Verge / Clash Verge Rev (Cross-platform: Windows, macOS, Linux):
     1. Checks explicit_dir or saved settings.json.
-    2. Inspects running process (verge-mihomo.exe / clash-verge.exe) to find install directory.
-    3. Checks standard Windows AppData and LocalAppData paths.
-    4. Checks portable mode folders.
-    5. Discovers verge-mihomo.exe executable.
+    2. Inspects running process (verge-mihomo / clash-verge).
+    3. Checks standard platform paths (macOS ~/Library/Application Support, Windows AppData, Linux ~/.config).
+    4. Discovers verge-mihomo executable.
     Returns: (config_dir, mihomo_exe_path)
     """
     settings = load_settings()
@@ -100,68 +130,90 @@ def detect_clash_environment(explicit_dir: Optional[str] = None) -> Tuple[Option
         if not mihomo_cand or not os.path.isfile(mihomo_cand):
             parent = os.path.dirname(explicit_dir)
             grandparent = os.path.dirname(parent)
-            for c in [os.path.join(parent, "verge-mihomo.exe"), os.path.join(grandparent, "verge-mihomo.exe")]:
+            for c in [
+                os.path.join(parent, "verge-mihomo.exe"),
+                os.path.join(grandparent, "verge-mihomo.exe"),
+                os.path.join(parent, "verge-mihomo"),
+                os.path.join(grandparent, "verge-mihomo")
+            ]:
                 if os.path.isfile(c):
                     mihomo_cand = c
                     break
         return explicit_dir, mihomo_cand
 
-    appdata = os.environ.get("APPDATA", "")
-    localappdata = os.environ.get("LOCALAPPDATA", "")
-    userprofile = os.environ.get("USERPROFILE", "")
-
+    home = os.path.expanduser("~")
     candidate_config_dirs = []
     proc_dir = None
 
-    # 1. Inspect running process via Win32 API
-    try:
-        import ctypes
-        from ctypes import wintypes
-        snap = ctypes.windll.kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
-        if snap != -1:
-            class PE32(ctypes.Structure):
-                _fields_ = [
-                    ('dwSize', wintypes.DWORD), ('cntUsage', wintypes.DWORD),
-                    ('th32ProcessID', wintypes.DWORD), ('th32DefaultHeapID', ctypes.c_void_p),
-                    ('th32ModuleID', wintypes.DWORD), ('cntThreads', wintypes.DWORD),
-                    ('th32ParentProcessID', wintypes.DWORD), ('pcPriClassBase', ctypes.c_long),
-                    ('dwFlags', wintypes.DWORD), ('szExeFile', ctypes.c_wchar * 260)
-                ]
-            pe = PE32()
-            pe.dwSize = ctypes.sizeof(PE32)
-            if ctypes.windll.kernel32.Process32FirstW(snap, ctypes.byref(pe)):
-                while True:
-                    exe_name = pe.szExeFile.lower()
-                    if exe_name in ['verge-mihomo.exe', 'clash-verge.exe', 'clash verge.exe']:
-                        h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pe.th32ProcessID)
-                        if h:
-                            buf = (ctypes.c_wchar * 1024)()
-                            s = wintypes.DWORD(1024)
-                            if ctypes.windll.kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(s)):
-                                proc_dir = os.path.dirname(buf.value)
+    # 1. Inspect running process on Windows
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+            snap = ctypes.windll.kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+            if snap != -1:
+                class PE32(ctypes.Structure):
+                    _fields_ = [
+                        ('dwSize', wintypes.DWORD), ('cntUsage', wintypes.DWORD),
+                        ('th32ProcessID', wintypes.DWORD), ('th32DefaultHeapID', ctypes.c_void_p),
+                        ('th32ModuleID', wintypes.DWORD), ('cntThreads', wintypes.DWORD),
+                        ('th32ParentProcessID', wintypes.DWORD), ('pcPriClassBase', ctypes.c_long),
+                        ('dwFlags', wintypes.DWORD), ('szExeFile', ctypes.c_wchar * 260)
+                    ]
+                pe = PE32()
+                pe.dwSize = ctypes.sizeof(PE32)
+                if ctypes.windll.kernel32.Process32FirstW(snap, ctypes.byref(pe)):
+                    while True:
+                        exe_name = pe.szExeFile.lower()
+                        if exe_name in ['verge-mihomo.exe', 'clash-verge.exe', 'clash verge.exe']:
+                            h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pe.th32ProcessID)
+                            if h:
+                                buf = (ctypes.c_wchar * 1024)()
+                                s = wintypes.DWORD(1024)
+                                if ctypes.windll.kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(s)):
+                                    proc_dir = os.path.dirname(buf.value)
+                                    ctypes.windll.kernel32.CloseHandle(h)
+                                    break
                                 ctypes.windll.kernel32.CloseHandle(h)
-                                break
-                            ctypes.windll.kernel32.CloseHandle(h)
-                    if not ctypes.windll.kernel32.Process32NextW(snap, ctypes.byref(pe)):
-                        break
-            ctypes.windll.kernel32.CloseHandle(snap)
-    except Exception as e:
-        print(f"[ConfigManager] Process detection notice: {e}")
+                        if not ctypes.windll.kernel32.Process32NextW(snap, ctypes.byref(pe)):
+                            break
+                ctypes.windll.kernel32.CloseHandle(snap)
+        except Exception as e:
+            print(f"[ConfigManager] Process detection notice: {e}")
 
     if proc_dir:
         # Portable mode: .config inside install directory
         candidate_config_dirs.append(os.path.join(proc_dir, ".config", "io.github.clash-verge-rev.clash-verge-rev"))
         candidate_config_dirs.append(os.path.join(proc_dir, ".config", "clash-verge"))
 
-    # Standard Windows install locations
-    candidate_config_dirs.extend([
-        os.path.join(appdata, "io.github.clash-verge-rev.clash-verge-rev"),
-        os.path.join(localappdata, "io.github.clash-verge-rev.clash-verge-rev"),
-        os.path.join(userprofile, ".config", "clash-verge-rev"),
-        os.path.join(userprofile, ".config", "io.github.clash-verge-rev.clash-verge-rev"),
-        os.path.join(appdata, "clash-verge"),
-        os.path.join(localappdata, "clash-verge"),
-    ])
+    # Platform-specific paths
+    if sys.platform == "darwin":
+        candidate_config_dirs.extend([
+            os.path.join(home, "Library", "Application Support", "io.github.clash-verge-rev.clash-verge-rev"),
+            os.path.join(home, "Library", "Application Support", "clash-verge"),
+            os.path.join(home, ".config", "clash-verge-rev"),
+            os.path.join(home, ".config", "clash-verge"),
+            os.path.join(home, ".config", "mihomo"),
+        ])
+    elif sys.platform == "win32":
+        appdata = os.environ.get("APPDATA", "")
+        localappdata = os.environ.get("LOCALAPPDATA", "")
+        userprofile = os.environ.get("USERPROFILE", home)
+        candidate_config_dirs.extend([
+            os.path.join(appdata, "io.github.clash-verge-rev.clash-verge-rev"),
+            os.path.join(localappdata, "io.github.clash-verge-rev.clash-verge-rev"),
+            os.path.join(userprofile, ".config", "clash-verge-rev"),
+            os.path.join(userprofile, ".config", "io.github.clash-verge-rev.clash-verge-rev"),
+            os.path.join(appdata, "clash-verge"),
+            os.path.join(localappdata, "clash-verge"),
+        ])
+    else:
+        candidate_config_dirs.extend([
+            os.path.join(home, ".config", "clash-verge-rev"),
+            os.path.join(home, ".config", "clash-verge"),
+            os.path.join(home, ".config", "mihomo"),
+            os.path.join(home, ".config", "io.github.clash-verge-rev.clash-verge-rev"),
+        ])
 
     valid_config_dir = None
     for d in candidate_config_dirs:
@@ -173,15 +225,35 @@ def detect_clash_environment(explicit_dir: Optional[str] = None) -> Tuple[Option
     mihomo_candidates = []
     if proc_dir:
         mihomo_candidates.append(os.path.join(proc_dir, "verge-mihomo.exe"))
+        mihomo_candidates.append(os.path.join(proc_dir, "verge-mihomo"))
     if valid_config_dir:
         p1 = os.path.dirname(os.path.dirname(valid_config_dir))
         mihomo_candidates.append(os.path.join(p1, "verge-mihomo.exe"))
-    for prog in [
-        r"C:\Program Files\Clash Verge",
-        r"C:\Program Files (x86)\Clash Verge",
-        os.path.join(localappdata, "Programs", "Clash Verge")
-    ]:
-        mihomo_candidates.append(os.path.join(prog, "verge-mihomo.exe"))
+        mihomo_candidates.append(os.path.join(p1, "verge-mihomo"))
+
+    if sys.platform == "darwin":
+        mihomo_candidates.extend([
+            "/Applications/Clash Verge Rev.app/Contents/MacOS/verge-mihomo",
+            "/Applications/Clash Verge.app/Contents/MacOS/verge-mihomo",
+            "/Applications/Clash Verge Rev.app/Contents/Resources/verge-mihomo",
+            "/Applications/Clash Verge.app/Contents/Resources/verge-mihomo",
+            "/opt/homebrew/bin/mihomo",
+            "/usr/local/bin/mihomo",
+        ])
+    elif sys.platform == "win32":
+        localappdata = os.environ.get("LOCALAPPDATA", "")
+        for prog in [
+            r"C:\Program Files\Clash Verge",
+            r"C:\Program Files (x86)\Clash Verge",
+            os.path.join(localappdata, "Programs", "Clash Verge")
+        ]:
+            mihomo_candidates.append(os.path.join(prog, "verge-mihomo.exe"))
+    else:
+        mihomo_candidates.extend([
+            "/usr/bin/mihomo",
+            "/usr/local/bin/mihomo",
+            "/opt/clash-verge/verge-mihomo",
+        ])
 
     valid_mihomo_exe = next((m for m in mihomo_candidates if os.path.isfile(m)), None)
 
@@ -323,6 +395,10 @@ class ConfigManager:
     def get_proxy_map(self) -> Dict[str, Dict[str, Any]]:
         proxies = self.data.get("proxies", [])
         return {p["name"]: p for p in proxies if isinstance(p, dict) and "name" in p}
+
+    def get_proxies(self) -> List[Dict[str, Any]]:
+        """Returns the full list of proxy dictionary objects from config."""
+        return [p for p in self.data.get("proxies", []) if isinstance(p, dict)]
 
     def get_protected_groups(self) -> Set[str]:
         """

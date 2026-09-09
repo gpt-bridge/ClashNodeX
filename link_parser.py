@@ -12,6 +12,7 @@ Supports:
 - Raw YAML proxy text
 """
 
+import os
 import base64
 import json
 import urllib.parse
@@ -516,3 +517,210 @@ def parse_qr_image(img_or_path) -> Tuple[List[Dict[str, Any]], List[str]]:
         failed.extend(f)
 
     return all_proxies, failed
+
+
+# ---------------- Export and Sharing Functions ---------------- #
+
+def export_proxy_to_link(proxy: Dict[str, Any]) -> str:
+    """
+    Serializes a Clash/Mihomo proxy dictionary into a standard shareable URI link
+    (vless://, vmess://, trojan://, ss://, hysteria2://, tuic://).
+    Returns empty string if unsupported.
+    """
+    if not isinstance(proxy, dict):
+        return ""
+    p_type = str(proxy.get("type", "")).lower().strip()
+    name = str(proxy.get("name", "")).strip()
+    server = str(proxy.get("server", "")).strip()
+    port = proxy.get("port", 443)
+    quoted_name = urllib.parse.quote(name)
+
+    if p_type == "vless":
+        uuid = str(proxy.get("uuid", "")).strip()
+        params: Dict[str, str] = {}
+        net = str(proxy.get("network", "tcp")).lower()
+        params["type"] = net
+
+        if proxy.get("reality-opts"):
+            params["security"] = "reality"
+            r_opts = proxy.get("reality-opts") or {}
+            if "public-key" in r_opts:
+                params["pbk"] = str(r_opts["public-key"])
+            if "short-id" in r_opts:
+                params["sid"] = str(r_opts["short-id"])
+            sni = proxy.get("servername") or proxy.get("sni")
+            if sni:
+                params["sni"] = str(sni)
+            if proxy.get("client-fingerprint"):
+                params["fp"] = str(proxy["client-fingerprint"])
+        elif proxy.get("tls"):
+            params["security"] = "tls"
+            sni = proxy.get("servername") or proxy.get("sni")
+            if sni:
+                params["sni"] = str(sni)
+            if proxy.get("client-fingerprint"):
+                params["fp"] = str(proxy["client-fingerprint"])
+            if proxy.get("skip-cert-verify"):
+                params["allowInsecure"] = "1"
+        else:
+            params["security"] = "none"
+
+        if proxy.get("flow"):
+            params["flow"] = str(proxy["flow"])
+
+        if net == "ws":
+            ws_opts = proxy.get("ws-opts") or {}
+            if "path" in ws_opts:
+                params["path"] = str(ws_opts["path"])
+            if "headers" in ws_opts and isinstance(ws_opts["headers"], dict) and "Host" in ws_opts["headers"]:
+                params["host"] = str(ws_opts["headers"]["Host"])
+        elif net == "grpc":
+            grpc_opts = proxy.get("grpc-opts") or {}
+            if "grpc-service-name" in grpc_opts:
+                params["serviceName"] = str(grpc_opts["grpc-service-name"])
+
+        q_str = urllib.parse.urlencode(params)
+        return f"vless://{uuid}@{server}:{port}?{q_str}#{quoted_name}"
+
+    elif p_type == "vmess":
+        v_data = {
+            "v": "2",
+            "ps": name,
+            "add": server,
+            "port": str(port),
+            "id": str(proxy.get("uuid", "")),
+            "aid": str(proxy.get("alterId", 0)),
+            "scy": str(proxy.get("cipher", "auto")),
+            "net": str(proxy.get("network", "tcp")),
+            "type": "none",
+            "host": "",
+            "path": "",
+            "tls": "tls" if proxy.get("tls") else "",
+            "sni": str(proxy.get("servername") or proxy.get("sni") or ""),
+        }
+        if v_data["net"] == "ws":
+            ws_opts = proxy.get("ws-opts") or {}
+            v_data["path"] = str(ws_opts.get("path", ""))
+            headers = ws_opts.get("headers") or {}
+            if isinstance(headers, dict) and "Host" in headers:
+                v_data["host"] = str(headers["Host"])
+        elif v_data["net"] == "grpc":
+            grpc_opts = proxy.get("grpc-opts") or {}
+            v_data["path"] = str(grpc_opts.get("grpc-service-name", ""))
+
+        raw_json = json.dumps(v_data, ensure_ascii=False)
+        b64 = base64.b64encode(raw_json.encode("utf-8")).decode("utf-8")
+        return f"vmess://{b64}"
+
+    elif p_type == "trojan":
+        password = str(proxy.get("password", ""))
+        params = {}
+        sni = proxy.get("sni") or proxy.get("servername")
+        if sni:
+            params["sni"] = str(sni)
+        if proxy.get("skip-cert-verify"):
+            params["allowInsecure"] = "1"
+        if proxy.get("network"):
+            params["type"] = str(proxy["network"])
+        if params.get("type") == "ws":
+            ws_opts = proxy.get("ws-opts") or {}
+            if "path" in ws_opts:
+                params["path"] = str(ws_opts["path"])
+            if "headers" in ws_opts and isinstance(ws_opts["headers"], dict) and "Host" in ws_opts["headers"]:
+                params["host"] = str(ws_opts["headers"]["Host"])
+        elif params.get("type") == "grpc":
+            grpc_opts = proxy.get("grpc-opts") or {}
+            if "grpc-service-name" in grpc_opts:
+                params["serviceName"] = str(grpc_opts["grpc-service-name"])
+        q_str = f"?{urllib.parse.urlencode(params)}" if params else ""
+        return f"trojan://{password}@{server}:{port}{q_str}#{quoted_name}"
+
+    elif p_type == "ss":
+        cipher = str(proxy.get("cipher", "aes-256-gcm"))
+        password = str(proxy.get("password", ""))
+        userinfo = base64.b64encode(f"{cipher}:{password}".encode("utf-8")).decode("utf-8")
+        return f"ss://{userinfo}@{server}:{port}#{quoted_name}"
+
+    elif p_type in ("hysteria2", "hy2"):
+        password = str(proxy.get("password", ""))
+        params = {}
+        if proxy.get("sni"):
+            params["sni"] = str(proxy["sni"])
+        if proxy.get("skip-cert-verify"):
+            params["insecure"] = "1"
+        if proxy.get("obfs"):
+            params["obfs"] = str(proxy["obfs"])
+            if proxy.get("obfs-password"):
+                params["obfs-password"] = str(proxy["obfs-password"])
+        q_str = f"?{urllib.parse.urlencode(params)}" if params else ""
+        return f"hysteria2://{password}@{server}:{port}/{q_str}#{quoted_name}"
+
+    elif p_type == "tuic":
+        uuid = str(proxy.get("uuid", ""))
+        password = str(proxy.get("password", ""))
+        params = {}
+        if proxy.get("sni"):
+            params["sni"] = str(proxy["sni"])
+        if proxy.get("congestion-controller"):
+            params["congestion_control"] = str(proxy["congestion-controller"])
+        if proxy.get("skip-cert-verify"):
+            params["allow_insecure"] = "1"
+        q_str = f"?{urllib.parse.urlencode(params)}" if params else ""
+        return f"tuic://{uuid}:{password}@{server}:{port}{q_str}#{quoted_name}"
+
+    return ""
+
+
+def export_proxies_to_links(proxies: List[Dict[str, Any]]) -> List[str]:
+    """Converts a list of proxies to a list of shareable URI strings."""
+    links = []
+    for p in proxies:
+        l = export_proxy_to_link(p)
+        if l:
+            links.append(l)
+    return links
+
+
+def export_proxies_to_subscription_base64(proxies: List[Dict[str, Any]]) -> str:
+    """Exports proxies as a Base64-encoded subscription string."""
+    links = export_proxies_to_links(proxies)
+    if not links:
+        return ""
+    combined = "\n".join(links)
+    return base64.b64encode(combined.encode("utf-8")).decode("utf-8")
+
+
+def export_proxies_to_yaml_snippet(proxies: List[Dict[str, Any]]) -> str:
+    """Exports proxies into a clean Clash/Mihomo YAML proxies configuration block."""
+    try:
+        clean_proxies = []
+        for p in proxies:
+            cp = {k: v for k, v in p.items() if not str(k).startswith("_")}
+            clean_proxies.append(cp)
+        return yaml.dump({"proxies": clean_proxies}, allow_unicode=True, sort_keys=False)
+    except Exception as e:
+        return f"# Error exporting YAML: {e}"
+
+
+def generate_proxy_qr_image(data: str, box_size: int = 7, border: int = 2):
+    """
+    Generates a PIL Image of a QR code containing `data`.
+    """
+    try:
+        import qrcode
+        from PIL import Image
+
+        qr = qrcode.QRCode(
+            version=None,
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            box_size=box_size,
+            border=border,
+        )
+        qr.add_data(data)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+        return img
+    except Exception as e:
+        print(f"[link_parser] Error generating QR code image: {e}")
+        return None
+
